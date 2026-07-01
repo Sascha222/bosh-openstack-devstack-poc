@@ -30,7 +30,6 @@ jobs:
         with:
           branch: stable/2024.1
           conf_overrides: |
-            # Minimale Config
             disable_service horizon tempest
             ENABLED_SERVICES=key,n-api,n-cpu,n-cond,n-sch,placement-api
             ENABLED_SERVICES+=,g-api,g-reg
@@ -38,6 +37,7 @@ jobs:
             ENABLED_SERVICES+=,q-svc,q-agt,q-dhcp,q-l3,q-meta
 
       - name: Test OpenStack APIs
+        if: success()
         run: |
           source /opt/stack/devstack/openrc admin admin
           pip3 install python-openstackclient
@@ -57,8 +57,10 @@ jobs:
           echo "✅ DevStack is ready for CPI testing!"
 
       - name: Save timing info
+        if: always()
         run: |
           echo "Setup completed at: $(date)" > timing.txt
+          echo "DevStack deployment status: ${{ job.status }}" >> timing.txt
           cat timing.txt
 
       - name: Upload results
@@ -66,4 +68,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: devstack-smoke-results
-          path: timing.txt
+          path: |
+            timing.txt
+            /opt/stack/devstack/logs/*.log

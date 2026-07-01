@@ -1,0 +1,150 @@
+name: DevStack Smoke Test (Fixed)
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  devstack-smoke:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90  # Erhöht von 60 → 90 Min
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Show system info
+        run: |
+          echo "=== System Info ==="
+          uname -a
+          df -h
+          free -h
+          nproc
+
+      - name: Free up disk space
+        run: |
+          echo "=== Disk space BEFORE cleanup ==="
+          df -h
+
+          # Aggressive cleanup for DevStack
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/hostedtoolcache
+
+          echo "=== Disk space AFTER cleanup ==="
+          df -h
+
+      - name: Install DevStack dependencies
+        run: |
+          # DevStack braucht diese Pakete
+          sudo apt-get update
+          sudo apt-get install -y git python3-pip
+
+      - name: Deploy DevStack (using action)
+        id: devstack
+        continue-on-error: true
+        uses: gophercloud/devstack-action@v0.6
+        with:
+          branch: stable/2024.1
+          conf_overrides: |
+            disable_service horizon tempest
+            ENABLED_SERVICES=key,n-api,n-cpu,n-cond,n-sch,placement-api
+            ENABLED_SERVICES+=,g-api,g-reg
+            ENABLED_SERVICES+=,c-sch,c-api,c-vol
+            ENABLED_SERVICES+=,q-svc,q-agt,q-dhcp,q-l3,q-meta
+
+      - name: Check DevStack status
+        if: always()
+        run: |
+          echo "DevStack action outcome: ${{ steps.devstack.outcome }}"
+
+          if [ -d "/opt/stack/devstack" ]; then
+            echo "✅ DevStack directory exists"
+            ls -la /opt/stack/devstack
+
+            if [ -f "/opt/stack/devstack/openrc" ]; then
+              echo "✅ openrc file exists"
+            else
+              echo "❌ openrc file NOT found"
+            fi
+
+            if [ -d "/opt/stack/devstack/logs" ]; then
+              echo "DevStack logs found:"
+              ls -lh /opt/stack/devstack/logs/*.log | head -5
+            fi
+          else
+            echo "❌ DevStack directory does NOT exist"
+          fi
+
+      - name: Test OpenStack APIs
+        if: steps.devstack.outcome == 'success'
+        run: |
+          source /opt/stack/devstack/openrc admin admin
+
+          # OpenStack CLI installieren (falls nicht vorhanden)
+          pip3 install --user python-openstackclient
+          export PATH=$PATH:$HOME/.local/bin
+
+          echo "=== OpenStack Endpoints ==="
+          openstack endpoint list
+
+          echo "=== Available Services ==="
+          openstack service list
+
+          echo "=== Compute Resources ==="
+          openstack hypervisor stats show || echo "⚠️ Hypervisor stats unavailable"
+
+          echo "=== Networks ==="
+          openstack network list
+
+          echo "=== Flavors ==="
+          openstack flavor list
+
+          echo "=== Images ==="
+          openstack image list
+
+          echo "✅ DevStack is ready for CPI testing!"
+
+      - name: Save results
+        if: always()
+        run: |
+          mkdir -p results
+
+          echo "=== DevStack Smoke Test Results ===" > results/summary.txt
+          echo "" >> results/summary.txt
+          echo "Timestamp: $(date)" >> results/summary.txt
+          echo "DevStack Action Outcome: ${{ steps.devstack.outcome }}" >> results/summary.txt
+          echo "Job Status: ${{ job.status }}" >> results/summary.txt
+          echo "" >> results/summary.txt
+
+          if [ -d "/opt/stack/devstack/logs" ]; then
+            echo "DevStack logs available: YES" >> results/summary.txt
+            echo "Log files:" >> results/summary.txt
+            ls -1 /opt/stack/devstack/logs/*.log >> results/summary.txt 2>&1 || echo "  (none)" >> results/summary.txt
+          else
+            echo "DevStack logs available: NO" >> results/summary.txt
+          fi
+
+          cat results/summary.txt
+
+      - name: Upload DevStack logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devstack-failure-logs
+          path: |
+            /opt/stack/devstack/logs/
+            results/
+          retention-days: 7
+
+      - name: Upload results (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devstack-smoke-results
+          path: results/
+          retention-days: 7

@@ -1,0 +1,102 @@
+name: DevStack Manual Install (Fallback)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  devstack-manual:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          echo "=== Disk space BEFORE ==="
+          df -h
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android /opt/hostedtoolcache
+          echo "=== Disk space AFTER ==="
+          df -h
+
+      - name: Install DevStack manually
+        run: |
+          # DevStack User erstellen
+          sudo useradd -s /bin/bash -d /opt/stack -m stack
+          echo "stack ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/stack
+          sudo chmod 0440 /etc/sudoers.d/stack
+
+          # DevStack clonen
+          sudo -u stack git clone https://opendev.org/openstack/devstack /opt/stack/devstack
+          cd /opt/stack/devstack
+          sudo -u stack git checkout stable/2024.1
+
+          # local.conf erstellen
+          sudo -u stack tee /opt/stack/devstack/local.conf > /dev/null <<EOF
+          [[local|localrc]]
+          # Credentials
+          ADMIN_PASSWORD=secret
+          DATABASE_PASSWORD=secret
+          RABBIT_PASSWORD=secret
+          SERVICE_PASSWORD=secret
+
+          # Minimale Services
+          disable_service horizon tempest
+          ENABLED_SERVICES=key,n-api,n-cpu,n-cond,n-sch,placement-api
+          ENABLED_SERVICES+=,g-api,g-reg
+          ENABLED_SERVICES+=,c-sch,c-api,c-vol
+          ENABLED_SERVICES+=,q-svc,q-agt,q-dhcp,q-l3,q-meta
+
+          # Logging
+          LOGFILE=/opt/stack/devstack/logs/stack.sh.log
+          VERBOSE=True
+          LOG_COLOR=False
+
+          # Performance
+          CINDER_VOLUME_CLEAR=none
+          EOF
+
+          cat /opt/stack/devstack/local.conf
+
+      - name: Run stack.sh
+        run: |
+          cd /opt/stack/devstack
+          sudo -u stack ./stack.sh
+        timeout-minutes: 60
+
+      - name: Test OpenStack
+        run: |
+          cd /opt/stack/devstack
+          source openrc admin admin
+
+          pip3 install --user python-openstackclient
+          export PATH=$PATH:$HOME/.local/bin
+
+          echo "=== OpenStack Endpoints ==="
+          openstack endpoint list
+
+          echo "=== Services ==="
+          openstack service list
+
+          echo "=== Networks ==="
+          openstack network list
+
+          echo "✅ DevStack manual install successful!"
+
+      - name: Save results
+        if: always()
+        run: |
+          mkdir -p results
+          echo "Manual DevStack install completed at: $(date)" > results/summary.txt
+          cat results/summary.txt
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devstack-manual-logs
+          path: |
+            /opt/stack/devstack/logs/
+            results/
+          retention-days: 7
