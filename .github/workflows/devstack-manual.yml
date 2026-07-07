@@ -28,8 +28,7 @@ jobs:
           sudo chmod 0440 /etc/sudoers.d/stack
 
           # DevStack clonen
-          sudo -u stack git clone https://opendev.org/openstack/devstack /opt/stack/devstack
-          sudo -u stack bash -c "cd /opt/stack/devstack && git checkout stable/2024.1"
+          sudo -u stack git clone --branch stable/2024.1 https://opendev.org/openstack/devstack /opt/stack/devstack
 
           # local.conf erstellen
           sudo -u stack tee /opt/stack/devstack/local.conf > /dev/null <<EOF
