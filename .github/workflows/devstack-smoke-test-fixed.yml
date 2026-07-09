@@ -47,7 +47,7 @@ jobs:
       - name: Deploy DevStack (using action)
         id: devstack
         continue-on-error: false
-        uses: gophercloud/devstack-action@v0.6
+        uses: gophercloud/devstack-action@v0.19
         with:
           branch: master
           conf_overrides: |
