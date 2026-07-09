@@ -53,7 +53,7 @@ jobs:
           conf_overrides: |
             FORCE=yes
             disable_service horizon tempest
-            ENABLED_SERVICES=key,n-api,n-cpu,n-cond,n-sch,placement-api
+            ENABLED_SERVICES=mysql,key,n-api,n-cpu,n-cond,n-sch,placement-api
             ENABLED_SERVICES+=,g-api,g-reg
             ENABLED_SERVICES+=,c-sch,c-api,c-vol
             ENABLED_SERVICES+=,q-svc,q-agt,q-dhcp,q-l3,q-meta
