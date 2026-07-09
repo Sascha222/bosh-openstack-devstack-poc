@@ -46,10 +46,10 @@ jobs:
 
       - name: Deploy DevStack (using action)
         id: devstack
-        continue-on-error: true
+        continue-on-error: false  # Ändern: Workflow soll bei DevStack-Fehler fehlschlagen
         uses: gophercloud/devstack-action@v0.6
         with:
-          branch: stable/2024.1
+          branch: master  # Ändern: master statt stable/2024.1 (aktuellster Code)
           conf_overrides: |
             disable_service horizon tempest
             ENABLED_SERVICES=key,n-api,n-cpu,n-cond,n-sch,placement-api
