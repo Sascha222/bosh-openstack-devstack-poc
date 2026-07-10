@@ -54,7 +54,7 @@ jobs:
             FORCE=yes
             disable_service horizon tempest
             # Use OVN - disables legacy q-agt, q-l3, q-dhcp, q-meta
-            ENABLED_SERVICES=mysql,key,n-api,n-cpu,n-cond,n-sch,placement-api
+            ENABLED_SERVICES=mysql,rabbit,key,n-api,n-cpu,n-cond,n-sch,placement-api
             ENABLED_SERVICES+=,g-api,g-reg
             ENABLED_SERVICES+=,c-sch,c-api,c-vol
             ENABLED_SERVICES+=,q-svc,ovn-controller,ovn-northd,q-ovn-metadata-agent
