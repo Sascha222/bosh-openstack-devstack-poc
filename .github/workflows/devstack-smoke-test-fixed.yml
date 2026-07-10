@@ -85,7 +85,19 @@ jobs:
       - name: Test OpenStack APIs
         if: steps.devstack.outcome == 'success'
         run: |
-          source /opt/stack/devstack/openrc admin admin
+          # Find openrc file - could be in different locations
+          if [ -f "/opt/stack/devstack/openrc" ]; then
+            source /opt/stack/devstack/openrc admin admin
+          elif [ -f "$HOME/devstack/openrc" ]; then
+            source $HOME/devstack/openrc admin admin
+          elif [ -f "./devstack/openrc" ]; then
+            source ./devstack/openrc admin admin
+          else
+            echo "❌ Cannot find openrc file"
+            find /opt/stack -name "openrc" 2>/dev/null || true
+            find $HOME -name "openrc" 2>/dev/null || true
+            exit 1
+          fi
 
           # OpenStack CLI installieren (falls nicht vorhanden)
           pip3 install --user python-openstackclient
