@@ -64,22 +64,44 @@ jobs:
         run: |
           echo "DevStack action outcome: ${{ steps.devstack.outcome }}"
 
-          if [ -d "/opt/stack/devstack" ]; then
-            echo "✅ DevStack directory exists"
-            ls -la /opt/stack/devstack
+          # Search for DevStack installation
+          echo "=== Searching for DevStack installation ==="
+          DEVSTACK_DIRS=(
+            "/opt/stack/devstack"
+            "$HOME/devstack"
+            "./devstack"
+            "/home/runner/work/bosh-openstack-devstack-poc/bosh-openstack-devstack-poc/devstack"
+          )
 
-            if [ -f "/opt/stack/devstack/openrc" ]; then
-              echo "✅ openrc file exists"
-            else
-              echo "❌ openrc file NOT found"
+          FOUND_DIR=""
+          for dir in "${DEVSTACK_DIRS[@]}"; do
+            if [ -d "$dir" ]; then
+              FOUND_DIR="$dir"
+              echo "✅ DevStack directory exists at: $dir"
+              break
             fi
+          done
 
-            if [ -d "/opt/stack/devstack/logs" ]; then
-              echo "DevStack logs found:"
-              ls -lh /opt/stack/devstack/logs/*.log | head -5
-            fi
+          if [ -z "$FOUND_DIR" ]; then
+            echo "❌ DevStack directory NOT found in common locations"
+            echo "Searching entire filesystem (may take a moment)..."
+            find /opt /home -type d -name "devstack" 2>/dev/null | head -5 || true
           else
-            echo "❌ DevStack directory does NOT exist"
+            ls -la "$FOUND_DIR" | head -20
+
+            if [ -f "$FOUND_DIR/openrc" ]; then
+              echo "✅ openrc file exists at: $FOUND_DIR/openrc"
+            else
+              echo "❌ openrc file NOT found at: $FOUND_DIR/openrc"
+              find "$FOUND_DIR" -name "openrc" 2>/dev/null || true
+            fi
+
+            if [ -d "$FOUND_DIR/logs" ]; then
+              echo "✅ DevStack logs found:"
+              ls -lh "$FOUND_DIR/logs"/*.log 2>/dev/null | head -5 || echo "No log files"
+            else
+              echo "❌ DevStack logs directory not found"
+            fi
           fi
 
       - name: Test OpenStack APIs
