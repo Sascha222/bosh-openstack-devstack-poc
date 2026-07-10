@@ -90,27 +90,9 @@ jobs:
           openstack --version
           openstack endpoint list
 
-      - name: Download Ubuntu Stemcell
+      - name: Use Cirros Test Image (skip stemcell download)
         run: |
-          echo "=== Downloading Ubuntu Cloud Image (as Stemcell alternative) ==="
-
-          mkdir -p ~/stemcells
-          cd ~/stemcells
-
-          # Use Ubuntu Cloud Image instead of full BOSH stemcell (much smaller and faster)
-          # Ubuntu 22.04 (Jammy) cloud image - ~600MB instead of 3GB stemcell
-          UBUNTU_VERSION="jammy"
-          IMAGE_URL="https://cloud-images.ubuntu.com/${UBUNTU_VERSION}/current/${UBUNTU_VERSION}-server-cloudimg-amd64.img"
-
-          echo "Downloading from: $IMAGE_URL"
-          wget -q --show-progress -O ubuntu-cloud-image.img "$IMAGE_URL"
-
-          ls -lh ubuntu-cloud-image.img
-          echo "✅ Ubuntu cloud image downloaded successfully"
-
-      - name: Extract and Upload Stemcell to Glance
-        run: |
-          echo "=== Uploading Image to Glance ==="
+          echo "=== Using Cirros Test Image ==="
 
           # Source OpenStack credentials
           if [ -f "./devstack/openrc" ]; then
@@ -121,26 +103,31 @@ jobs:
 
           export PATH=$PATH:$HOME/.local/bin
 
-          cd ~/stemcells
-
-          # Upload Ubuntu cloud image directly (no extraction needed)
-          IMAGE_FILE="ubuntu-cloud-image.img"
-
-          echo "Uploading image: $IMAGE_FILE"
-
-          # Upload to Glance
-          openstack image create \
-            --disk-format qcow2 \
-            --container-format bare \
-            --file "$IMAGE_FILE" \
-            --property hw_vif_model=virtio \
-            --property hw_disk_bus=virtio \
-            bosh-ubuntu-test-image
-
-          # Verify upload
-          echo "=== Verifying Image in Glance ==="
+          # Check if Cirros image already exists (DevStack creates it by default)
+          echo "Checking for existing test images..."
           openstack image list
-          openstack image show bosh-ubuntu-test-image
+
+          # If no cirros image, download it (tiny: ~13MB)
+          if ! openstack image show cirros-test >/dev/null 2>&1; then
+            echo "Downloading Cirros test image..."
+            mkdir -p ~/images
+            cd ~/images
+            wget -q http://download.cirros-cloud.net/0.6.2/cirros-0.6.2-x86_64-disk.img
+
+            # Upload to Glance
+            openstack image create \
+              --disk-format qcow2 \
+              --container-format bare \
+              --public \
+              --file cirros-0.6.2-x86_64-disk.img \
+              cirros-test
+
+            echo "✅ Cirros image uploaded"
+          else
+            echo "✅ Cirros image already exists"
+          fi
+
+          openstack image show cirros-test || openstack image show cirros-0.6.2-x86_64-uec || true
 
       - name: Setup BOSH Environment
         run: |
@@ -224,8 +211,8 @@ jobs:
 
           export PATH=$PATH:$HOME/.local/bin
 
-          # Get stemcell image ID
-          IMAGE_ID=$(openstack image list -f value -c ID -c Name | grep bosh-ubuntu-test-image | awk '{print $1}')
+          # Get test image ID (try multiple names)
+          IMAGE_ID=$(openstack image list -f value -c ID -c Name | grep -E "cirros" | head -1 | awk '{print $1}')
 
           if [ -z "$IMAGE_ID" ]; then
             echo "ERROR: Test image not found"
@@ -236,12 +223,8 @@ jobs:
           # Get network ID
           NETWORK_ID=$(openstack network list -f value -c ID -c Name | grep -E "private|shared" | head -1 | awk '{print $1}')
 
-          # Get flavor (use smallest available)
-          FLAVOR=$(openstack flavor list -f value -c Name | grep -E "m1.tiny|m1.small|tiny|small" | head -1)
-
-          if [ -z "$FLAVOR" ]; then
-            FLAVOR="m1.small"
-          fi
+          # Use smallest flavor (cirros needs minimal resources)
+          FLAVOR="m1.tiny"
 
           echo "Image ID: $IMAGE_ID"
           echo "Network ID: $NETWORK_ID"
@@ -259,14 +242,18 @@ jobs:
           echo "Waiting for VM to become active..."
           timeout 300 bash -c '
             while true; do
-              STATUS=$(openstack server show bosh-test-vm -f value -c status)
+              STATUS=$(openstack server show bosh-test-vm -f value -c status 2>/dev/null || echo "NOTFOUND")
               echo "VM Status: $STATUS"
               if [ "$STATUS" = "ACTIVE" ]; then
                 break
               elif [ "$STATUS" = "ERROR" ]; then
-                echo "VM creation failed!"
+                echo "❌ VM creation failed!"
                 openstack server show bosh-test-vm
+                echo ""
+                echo "Checking Nova compute logs for errors..."
                 exit 1
+              elif [ "$STATUS" = "NOTFOUND" ]; then
+                echo "VM not found yet..."
               fi
               sleep 5
             done
