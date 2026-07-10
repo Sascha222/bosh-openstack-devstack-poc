@@ -92,27 +92,25 @@ jobs:
 
       - name: Download Ubuntu Stemcell
         run: |
-          echo "=== Downloading Ubuntu Jammy Stemcell ==="
-
-          # Download light stemcell for OpenStack (smaller, faster)
-          STEMCELL_VERSION="1.625"
-          STEMCELL_URL="https://bosh.io/d/stemcells/bosh-openstack-kvm-ubuntu-jammy-go_agent?v=${STEMCELL_VERSION}"
+          echo "=== Downloading Ubuntu Cloud Image (as Stemcell alternative) ==="
 
           mkdir -p ~/stemcells
           cd ~/stemcells
 
-          wget -q -O bosh-stemcell.tgz "${STEMCELL_URL}" || {
-            echo "Failed to download stemcell from bosh.io, trying alternative..."
-            # Fallback: use smaller test stemcell
-            wget -q -O bosh-stemcell.tgz "https://s3.amazonaws.com/bosh-core-stemcells/openstack/bosh-stemcell-${STEMCELL_VERSION}-openstack-kvm-ubuntu-jammy-go_agent.tgz"
-          }
+          # Use Ubuntu Cloud Image instead of full BOSH stemcell (much smaller and faster)
+          # Ubuntu 22.04 (Jammy) cloud image - ~600MB instead of 3GB stemcell
+          UBUNTU_VERSION="jammy"
+          IMAGE_URL="https://cloud-images.ubuntu.com/${UBUNTU_VERSION}/current/${UBUNTU_VERSION}-server-cloudimg-amd64.img"
 
-          ls -lh bosh-stemcell.tgz
-          echo "Stemcell downloaded successfully"
+          echo "Downloading from: $IMAGE_URL"
+          wget -q --show-progress -O ubuntu-cloud-image.img "$IMAGE_URL"
+
+          ls -lh ubuntu-cloud-image.img
+          echo "✅ Ubuntu cloud image downloaded successfully"
 
       - name: Extract and Upload Stemcell to Glance
         run: |
-          echo "=== Uploading Stemcell to Glance ==="
+          echo "=== Uploading Image to Glance ==="
 
           # Source OpenStack credentials
           if [ -f "./devstack/openrc" ]; then
@@ -125,19 +123,10 @@ jobs:
 
           cd ~/stemcells
 
-          # Extract image from stemcell tarball
-          tar -xzf bosh-stemcell.tgz
+          # Upload Ubuntu cloud image directly (no extraction needed)
+          IMAGE_FILE="ubuntu-cloud-image.img"
 
-          # Find the image file (usually .img or in image file)
-          IMAGE_FILE=$(find . -name "*.img" -o -name "image" | head -1)
-
-          if [ -z "$IMAGE_FILE" ]; then
-            echo "ERROR: Could not find image file in stemcell"
-            ls -la
-            exit 1
-          fi
-
-          echo "Found image: $IMAGE_FILE"
+          echo "Uploading image: $IMAGE_FILE"
 
           # Upload to Glance
           openstack image create \
@@ -146,12 +135,12 @@ jobs:
             --file "$IMAGE_FILE" \
             --property hw_vif_model=virtio \
             --property hw_disk_bus=virtio \
-            bosh-ubuntu-jammy-stemcell
+            bosh-ubuntu-test-image
 
           # Verify upload
-          echo "=== Verifying Stemcell in Glance ==="
+          echo "=== Verifying Image in Glance ==="
           openstack image list
-          openstack image show bosh-ubuntu-jammy-stemcell
+          openstack image show bosh-ubuntu-test-image
 
       - name: Setup BOSH Environment
         run: |
@@ -236,10 +225,11 @@ jobs:
           export PATH=$PATH:$HOME/.local/bin
 
           # Get stemcell image ID
-          IMAGE_ID=$(openstack image list -f value -c ID -c Name | grep bosh-ubuntu-jammy-stemcell | awk '{print $1}')
+          IMAGE_ID=$(openstack image list -f value -c ID -c Name | grep bosh-ubuntu-test-image | awk '{print $1}')
 
           if [ -z "$IMAGE_ID" ]; then
-            echo "ERROR: Stemcell image not found"
+            echo "ERROR: Test image not found"
+            openstack image list
             exit 1
           fi
 
