@@ -100,7 +100,10 @@ jobs:
               echo "✅ DevStack logs found:"
               ls -lh "$FOUND_DIR/logs"/*.log 2>/dev/null | head -5 || echo "No log files"
             else
-              echo "❌ DevStack logs directory not found"
+              echo "⚠️ DevStack logs directory not found at $FOUND_DIR/logs"
+              echo "Searching for logs in common locations..."
+              find /opt/stack -type d -name "logs" 2>/dev/null | head -3 || true
+              find "$FOUND_DIR/.." -type d -name "logs" 2>/dev/null | head -3 || true
             fi
           fi
 
