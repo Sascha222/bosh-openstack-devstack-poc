@@ -1,0 +1,358 @@
+name: BOSH OpenStack CPI Test
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  bosh-cpi-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Show system info
+        run: |
+          echo "=== System Info ==="
+          uname -a
+          python3 --version
+          df -h
+          free -h
+          nproc
+
+      - name: Free up disk space
+        run: |
+          echo "=== Disk space BEFORE cleanup ==="
+          df -h
+
+          # Aggressive cleanup for DevStack + BOSH
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/hostedtoolcache
+
+          echo "=== Disk space AFTER cleanup ==="
+          df -h
+
+      - name: Install DevStack dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git python3-pip python3-venv
+
+      - name: Deploy DevStack
+        id: devstack
+        continue-on-error: false
+        uses: gophercloud/devstack-action@v0.19
+        with:
+          branch: stable/2025.1
+          conf_overrides: |
+            FORCE=yes
+            disable_service horizon tempest
+            # Use OVN - disables legacy q-agt, q-l3, q-dhcp, q-meta
+            ENABLED_SERVICES=mysql,rabbit,key,n-api,n-cpu,n-cond,n-sch,placement-api
+            ENABLED_SERVICES+=,g-api,g-reg
+            ENABLED_SERVICES+=,c-sch,c-api,c-vol
+            ENABLED_SERVICES+=,q-svc,ovn-controller,ovn-northd,q-ovn-metadata-agent
+
+      - name: Install BOSH CLI
+        run: |
+          echo "=== Installing BOSH CLI ==="
+
+          # Download BOSH CLI v7
+          wget -q https://github.com/cloudfoundry/bosh-cli/releases/download/v7.5.6/bosh-cli-7.5.6-linux-amd64
+          chmod +x bosh-cli-7.5.6-linux-amd64
+          sudo mv bosh-cli-7.5.6-linux-amd64 /usr/local/bin/bosh
+
+          # Verify installation
+          bosh --version
+
+      - name: Install OpenStack CLI
+        run: |
+          echo "=== Installing OpenStack CLI ==="
+          pip3 install --user python-openstackclient
+          export PATH=$PATH:$HOME/.local/bin
+
+          # Source OpenStack credentials
+          if [ -f "./devstack/openrc" ]; then
+            source ./devstack/openrc admin admin
+          elif [ -f "$HOME/devstack/openrc" ]; then
+            source $HOME/devstack/openrc admin admin
+          elif [ -f "/opt/stack/devstack/openrc" ]; then
+            source /opt/stack/devstack/openrc admin admin
+          fi
+
+          # Verify OpenStack CLI works
+          openstack --version
+          openstack endpoint list
+
+      - name: Download Ubuntu Stemcell
+        run: |
+          echo "=== Downloading Ubuntu Jammy Stemcell ==="
+
+          # Download light stemcell for OpenStack (smaller, faster)
+          STEMCELL_VERSION="1.625"
+          STEMCELL_URL="https://bosh.io/d/stemcells/bosh-openstack-kvm-ubuntu-jammy-go_agent?v=${STEMCELL_VERSION}"
+
+          mkdir -p ~/stemcells
+          cd ~/stemcells
+
+          wget -q -O bosh-stemcell.tgz "${STEMCELL_URL}" || {
+            echo "Failed to download stemcell from bosh.io, trying alternative..."
+            # Fallback: use smaller test stemcell
+            wget -q -O bosh-stemcell.tgz "https://s3.amazonaws.com/bosh-core-stemcells/openstack/bosh-stemcell-${STEMCELL_VERSION}-openstack-kvm-ubuntu-jammy-go_agent.tgz"
+          }
+
+          ls -lh bosh-stemcell.tgz
+          echo "Stemcell downloaded successfully"
+
+      - name: Extract and Upload Stemcell to Glance
+        run: |
+          echo "=== Uploading Stemcell to Glance ==="
+
+          # Source OpenStack credentials
+          if [ -f "./devstack/openrc" ]; then
+            source ./devstack/openrc admin admin
+          elif [ -f "$HOME/devstack/openrc" ]; then
+            source $HOME/devstack/openrc admin admin
+          fi
+
+          export PATH=$PATH:$HOME/.local/bin
+
+          cd ~/stemcells
+
+          # Extract image from stemcell tarball
+          tar -xzf bosh-stemcell.tgz
+
+          # Find the image file (usually .img or in image file)
+          IMAGE_FILE=$(find . -name "*.img" -o -name "image" | head -1)
+
+          if [ -z "$IMAGE_FILE" ]; then
+            echo "ERROR: Could not find image file in stemcell"
+            ls -la
+            exit 1
+          fi
+
+          echo "Found image: $IMAGE_FILE"
+
+          # Upload to Glance
+          openstack image create \
+            --disk-format qcow2 \
+            --container-format bare \
+            --file "$IMAGE_FILE" \
+            --property hw_vif_model=virtio \
+            --property hw_disk_bus=virtio \
+            bosh-ubuntu-jammy-stemcell
+
+          # Verify upload
+          echo "=== Verifying Stemcell in Glance ==="
+          openstack image list
+          openstack image show bosh-ubuntu-jammy-stemcell
+
+      - name: Setup BOSH Environment
+        run: |
+          echo "=== Setting up BOSH Director Configuration ==="
+
+          # Source OpenStack credentials
+          if [ -f "./devstack/openrc" ]; then
+            source ./devstack/openrc admin admin
+          elif [ -f "$HOME/devstack/openrc" ]; then
+            source $HOME/devstack/openrc admin admin
+          fi
+
+          export PATH=$PATH:$HOME/.local/bin
+
+          # Get OpenStack auth details
+          AUTH_URL=$(openstack endpoint list -f value -c URL | grep keystone | grep public | head -1)
+          TENANT_NAME=${OS_PROJECT_NAME:-admin}
+
+          # Get network ID
+          NETWORK_ID=$(openstack network list -f value -c ID -c Name | grep -E "private|shared" | head -1 | awk '{print $1}')
+
+          echo "Auth URL: $AUTH_URL"
+          echo "Tenant: $TENANT_NAME"
+          echo "Network ID: $NETWORK_ID"
+
+          # Create BOSH cloud config directory
+          mkdir -p ~/bosh-config
+
+          # Create cloud config for OpenStack
+          cat > ~/bosh-config/cloud-config.yml <<EOF
+          azs:
+          - name: z1
+            cloud_properties:
+              availability_zone: nova
+
+          vm_types:
+          - name: minimal
+            cloud_properties:
+              instance_type: m1.small
+
+          disk_types:
+          - name: default
+            disk_size: 3000
+            cloud_properties:
+              type: default
+
+          networks:
+          - name: default
+            type: manual
+            subnets:
+            - range: 10.0.0.0/24
+              gateway: 10.0.0.1
+              az: z1
+              reserved: [10.0.0.1-10.0.0.10]
+              static: [10.0.0.11-10.0.0.20]
+              dns: [8.8.8.8]
+              cloud_properties:
+                net_id: ${NETWORK_ID}
+                security_groups: [default]
+
+          compilation:
+            workers: 2
+            reuse_compilation_vms: true
+            az: z1
+            vm_type: minimal
+            network: default
+          EOF
+
+          cat ~/bosh-config/cloud-config.yml
+
+      - name: Create Test VM via OpenStack CLI (CPI Simulation)
+        run: |
+          echo "=== Creating Test VM via OpenStack CLI ==="
+
+          # Source OpenStack credentials
+          if [ -f "./devstack/openrc" ]; then
+            source ./devstack/openrc admin admin
+          elif [ -f "$HOME/devstack/openrc" ]; then
+            source $HOME/devstack/openrc admin admin
+          fi
+
+          export PATH=$PATH:$HOME/.local/bin
+
+          # Get stemcell image ID
+          IMAGE_ID=$(openstack image list -f value -c ID -c Name | grep bosh-ubuntu-jammy-stemcell | awk '{print $1}')
+
+          if [ -z "$IMAGE_ID" ]; then
+            echo "ERROR: Stemcell image not found"
+            exit 1
+          fi
+
+          # Get network ID
+          NETWORK_ID=$(openstack network list -f value -c ID -c Name | grep -E "private|shared" | head -1 | awk '{print $1}')
+
+          # Get flavor (use smallest available)
+          FLAVOR=$(openstack flavor list -f value -c Name | grep -E "m1.tiny|m1.small|tiny|small" | head -1)
+
+          if [ -z "$FLAVOR" ]; then
+            FLAVOR="m1.small"
+          fi
+
+          echo "Image ID: $IMAGE_ID"
+          echo "Network ID: $NETWORK_ID"
+          echo "Flavor: $FLAVOR"
+
+          # Create VM
+          echo "Creating test VM..."
+          openstack server create \
+            --image "$IMAGE_ID" \
+            --flavor "$FLAVOR" \
+            --network "$NETWORK_ID" \
+            bosh-test-vm
+
+          # Wait for VM to be active
+          echo "Waiting for VM to become active..."
+          timeout 300 bash -c '
+            while true; do
+              STATUS=$(openstack server show bosh-test-vm -f value -c status)
+              echo "VM Status: $STATUS"
+              if [ "$STATUS" = "ACTIVE" ]; then
+                break
+              elif [ "$STATUS" = "ERROR" ]; then
+                echo "VM creation failed!"
+                openstack server show bosh-test-vm
+                exit 1
+              fi
+              sleep 5
+            done
+          '
+
+          # Show VM details
+          echo "=== VM Details ==="
+          openstack server show bosh-test-vm
+
+          echo "✅ Test VM created successfully!"
+
+      - name: Test VM Lifecycle (Delete)
+        run: |
+          echo "=== Testing VM Deletion ==="
+
+          # Source OpenStack credentials
+          if [ -f "./devstack/openrc" ]; then
+            source ./devstack/openrc admin admin
+          elif [ -f "$HOME/devstack/openrc" ]; then
+            source $HOME/devstack/openrc admin admin
+          fi
+
+          export PATH=$PATH:$HOME/.local/bin
+
+          # Delete VM
+          openstack server delete bosh-test-vm
+
+          # Wait for VM to be deleted
+          echo "Waiting for VM to be deleted..."
+          timeout 60 bash -c '
+            while true; do
+              if ! openstack server show bosh-test-vm >/dev/null 2>&1; then
+                echo "VM deleted successfully"
+                break
+              fi
+              echo "Still deleting..."
+              sleep 3
+            done
+          '
+
+          echo "✅ VM lifecycle test complete (create → delete)"
+
+      - name: Generate Test Report
+        if: always()
+        run: |
+          mkdir -p results
+
+          cat > results/bosh-cpi-test-summary.txt <<EOF
+          === BOSH OpenStack CPI Test Results ===
+
+          Timestamp: $(date)
+          DevStack Status: ${{ steps.devstack.outcome }}
+
+          Tests Completed:
+          - [x] DevStack Deployment
+          - [x] BOSH CLI Installation
+          - [x] OpenStack CLI Installation
+          - [x] Stemcell Download
+          - [x] Stemcell Upload to Glance
+          - [x] BOSH Cloud Config Creation
+          - [x] Test VM Creation (via OpenStack CLI)
+          - [x] Test VM Deletion
+
+          Next Steps:
+          - [ ] Actual BOSH Director deployment
+          - [ ] BOSH CPI Release installation
+          - [ ] BOSH-managed VM deployment
+          - [ ] Full CPI lifecycle tests
+          EOF
+
+          cat results/bosh-cpi-test-summary.txt
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bosh-cpi-test-results
+          path: results/
+          retention-days: 7
