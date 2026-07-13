@@ -1,0 +1,404 @@
+name: CPI Extended Test - Disk, Network, Security Groups
+
+on:
+  workflow_dispatch:
+
+jobs:
+  cpi-extended-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Show system info
+        run: |
+          echo "=== System Info ==="
+          uname -a
+          python3 --version
+          df -h
+          free -h
+          nproc
+
+      - name: Free up disk space
+        run: |
+          echo "=== Disk space BEFORE cleanup ==="
+          df -h
+
+          # Aggressive cleanup for DevStack
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/hostedtoolcache
+
+          echo "=== Disk space AFTER cleanup ==="
+          df -h
+
+      - name: Install DevStack dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git python3-pip python3-venv
+
+      - name: Deploy DevStack
+        id: devstack
+        uses: gophercloud/devstack-action@v0.19
+        with:
+          branch: 'stable/2025.1'
+          conf_overrides: |
+            [[local|localrc]]
+            ADMIN_PASSWORD=secret
+            DATABASE_PASSWORD=secret
+            RABBIT_PASSWORD=secret
+            SERVICE_PASSWORD=secret
+
+            # Enable minimal services
+            disable_all_services
+            enable_service mysql rabbit key
+
+            # Nova (Compute)
+            enable_service n-api n-cpu n-cond n-sch
+            enable_service placement-api
+
+            # Glance (Image)
+            enable_service g-api g-reg
+
+            # Cinder (Block Storage) - NEEDED for volume tests!
+            enable_service c-sch c-api c-vol
+
+            # Neutron (Network) with OVN
+            enable_service q-svc
+            enable_service ovn-controller ovn-northd q-ovn-metadata-agent
+
+            # Log output
+            LOGFILE=/opt/stack/logs/stack.sh.log
+            VERBOSE=True
+            LOG_COLOR=False
+
+      - name: Wait for DevStack to stabilize
+        run: sleep 30
+
+      - name: Source OpenStack credentials
+        run: |
+          if [ -f "./devstack/openrc" ]; then
+            source ./devstack/openrc admin admin
+          elif [ -f "/opt/stack/devstack/openrc" ]; then
+            source /opt/stack/devstack/openrc admin admin
+          else
+            echo "ERROR: openrc file not found!"
+            exit 1
+          fi
+
+          # Export for subsequent steps
+          echo "OS_AUTH_URL=$OS_AUTH_URL" >> $GITHUB_ENV
+          echo "OS_USERNAME=$OS_USERNAME" >> $GITHUB_ENV
+          echo "OS_PASSWORD=$OS_PASSWORD" >> $GITHUB_ENV
+          echo "OS_PROJECT_NAME=$OS_PROJECT_NAME" >> $GITHUB_ENV
+          echo "OS_USER_DOMAIN_NAME=$OS_USER_DOMAIN_NAME" >> $GITHUB_ENV
+          echo "OS_PROJECT_DOMAIN_NAME=$OS_PROJECT_DOMAIN_NAME" >> $GITHUB_ENV
+          echo "OS_IDENTITY_API_VERSION=3" >> $GITHUB_ENV
+
+      - name: Install OpenStack CLI
+        run: |
+          python3 -m pip install --user python-openstackclient python-cinderclient python-neutronclient
+
+      - name: Verify OpenStack Services
+        run: |
+          echo "=== OpenStack Service List ==="
+          openstack service list
+
+          echo "=== OpenStack Endpoint List ==="
+          openstack endpoint list
+
+          echo "=== Cinder Service List (Block Storage) ==="
+          openstack volume service list
+
+      - name: Download Cirros Image
+        run: |
+          echo "=== Downloading Cirros test image ==="
+          wget -q https://download.cirros-cloud.net/0.6.2/cirros-0.6.2-x86_64-disk.img -O cirros.img
+          ls -lh cirros.img
+
+      - name: Upload Image to Glance
+        run: |
+          echo "=== Uploading Cirros image to Glance ==="
+          openstack image create \
+            --disk-format qcow2 \
+            --container-format bare \
+            --public \
+            --file cirros.img \
+            cirros-test
+
+          echo "=== Verify image ==="
+          openstack image list
+          openstack image show cirros-test
+
+      # ========================================
+      # TEST 1: Security Groups
+      # ========================================
+      - name: Test 1 - Create Security Group
+        id: test_security_group
+        run: |
+          echo "=== TEST 1: Security Groups ==="
+
+          echo "Step 1: Create security group"
+          openstack security group create \
+            --description "Test security group for CPI tests" \
+            cpi-test-sg
+
+          echo "Step 2: Add SSH rule (port 22)"
+          openstack security group rule create \
+            --protocol tcp \
+            --dst-port 22:22 \
+            --remote-ip 0.0.0.0/0 \
+            cpi-test-sg
+
+          echo "Step 3: Add ICMP rule (ping)"
+          openstack security group rule create \
+            --protocol icmp \
+            cpi-test-sg
+
+          echo "Step 4: List security group rules"
+          openstack security group show cpi-test-sg
+          openstack security group rule list cpi-test-sg
+
+          echo "✅ TEST 1 PASSED: Security group creation and rule management"
+
+      # ========================================
+      # TEST 2: Network Configuration
+      # ========================================
+      - name: Test 2 - Network Configuration
+        id: test_network
+        run: |
+          echo "=== TEST 2: Network Configuration ==="
+
+          echo "Step 1: List existing networks"
+          openstack network list
+
+          echo "Step 2: Create custom network"
+          openstack network create cpi-test-network
+
+          echo "Step 3: Create subnet"
+          openstack subnet create \
+            --network cpi-test-network \
+            --subnet-range 192.168.100.0/24 \
+            --dns-nameserver 8.8.8.8 \
+            cpi-test-subnet
+
+          echo "Step 4: Show network details"
+          openstack network show cpi-test-network
+          openstack subnet show cpi-test-subnet
+
+          echo "Step 5: List all networks and subnets"
+          openstack network list
+          openstack subnet list
+
+          echo "✅ TEST 2 PASSED: Custom network and subnet creation"
+
+      # ========================================
+      # TEST 3: VM Creation with Network & Security Group
+      # ========================================
+      - name: Test 3 - Create VM with custom network and security group
+        id: test_vm_creation
+        run: |
+          echo "=== TEST 3: VM Creation with Network & Security Group ==="
+
+          echo "Step 1: Get network ID"
+          NETWORK_ID=$(openstack network show cpi-test-network -f value -c id)
+          echo "Network ID: $NETWORK_ID"
+
+          echo "Step 2: Create VM"
+          openstack server create \
+            --flavor m1.tiny \
+            --image cirros-test \
+            --network cpi-test-network \
+            --security-group cpi-test-sg \
+            test-vm
+
+          echo "Step 3: Wait for VM to become ACTIVE"
+          for i in {1..30}; do
+            STATUS=$(openstack server show test-vm -f value -c status)
+            echo "Attempt $i/30: VM status = $STATUS"
+
+            if [ "$STATUS" = "ACTIVE" ]; then
+              echo "✅ VM is ACTIVE!"
+              break
+            elif [ "$STATUS" = "ERROR" ]; then
+              echo "❌ VM went to ERROR state!"
+              openstack server show test-vm
+              exit 1
+            fi
+
+            sleep 2
+          done
+
+          echo "Step 4: Show VM details"
+          openstack server show test-vm
+
+          echo "Step 5: Verify network attachment"
+          openstack server show test-vm -c addresses -c networks
+
+          echo "✅ TEST 3 PASSED: VM created with custom network and security group"
+
+      # ========================================
+      # TEST 4: Volume (Disk) Operations
+      # ========================================
+      - name: Test 4a - Create Volume
+        id: test_volume_create
+        run: |
+          echo "=== TEST 4a: Create Volume (Disk) ==="
+
+          echo "Step 1: Create 1GB volume"
+          openstack volume create \
+            --size 1 \
+            --description "Test volume for CPI disk attach/detach" \
+            test-volume
+
+          echo "Step 2: Wait for volume to become available"
+          for i in {1..30}; do
+            STATUS=$(openstack volume show test-volume -f value -c status)
+            echo "Attempt $i/30: Volume status = $STATUS"
+
+            if [ "$STATUS" = "available" ]; then
+              echo "✅ Volume is available!"
+              break
+            elif [ "$STATUS" = "error" ]; then
+              echo "❌ Volume went to error state!"
+              openstack volume show test-volume
+              exit 1
+            fi
+
+            sleep 2
+          done
+
+          echo "Step 3: Show volume details"
+          openstack volume show test-volume
+          openstack volume list
+
+          echo "✅ TEST 4a PASSED: Volume created successfully"
+
+      - name: Test 4b - Attach Volume to VM
+        id: test_volume_attach
+        run: |
+          echo "=== TEST 4b: Attach Volume to VM ==="
+
+          echo "Step 1: Attach volume to VM"
+          openstack server add volume test-vm test-volume
+
+          echo "Step 2: Wait for attachment to complete"
+          sleep 10
+
+          echo "Step 3: Verify attachment"
+          openstack volume show test-volume
+          openstack server show test-vm
+
+          # Check if volume is attached
+          ATTACHMENTS=$(openstack volume show test-volume -f value -c attachments)
+          if [[ "$ATTACHMENTS" == *"test-vm"* ]]; then
+            echo "✅ Volume successfully attached to VM!"
+          else
+            echo "❌ Volume not attached!"
+            exit 1
+          fi
+
+          echo "✅ TEST 4b PASSED: Volume attached to VM"
+
+      - name: Test 4c - Detach Volume from VM
+        id: test_volume_detach
+        run: |
+          echo "=== TEST 4c: Detach Volume from VM ==="
+
+          echo "Step 1: Detach volume from VM"
+          openstack server remove volume test-vm test-volume
+
+          echo "Step 2: Wait for detachment to complete"
+          sleep 10
+
+          echo "Step 3: Verify detachment"
+          openstack volume show test-volume
+
+          # Check if volume is detached (available)
+          STATUS=$(openstack volume show test-volume -f value -c status)
+          if [ "$STATUS" = "available" ]; then
+            echo "✅ Volume successfully detached and available!"
+          else
+            echo "❌ Volume not properly detached! Status: $STATUS"
+            exit 1
+          fi
+
+          echo "✅ TEST 4c PASSED: Volume detached from VM"
+
+      # ========================================
+      # Cleanup
+      # ========================================
+      - name: Cleanup - Delete VM
+        if: always()
+        run: |
+          echo "=== Cleanup: Deleting VM ==="
+          openstack server delete test-vm || true
+          sleep 10
+          echo "VM deleted"
+
+      - name: Cleanup - Delete Volume
+        if: always()
+        run: |
+          echo "=== Cleanup: Deleting Volume ==="
+          openstack volume delete test-volume || true
+          sleep 5
+          echo "Volume deleted"
+
+      - name: Cleanup - Delete Network Resources
+        if: always()
+        run: |
+          echo "=== Cleanup: Deleting Network Resources ==="
+          openstack subnet delete cpi-test-subnet || true
+          openstack network delete cpi-test-network || true
+          echo "Network resources deleted"
+
+      - name: Cleanup - Delete Security Group
+        if: always()
+        run: |
+          echo "=== Cleanup: Deleting Security Group ==="
+          openstack security group delete cpi-test-sg || true
+          echo "Security group deleted"
+
+      - name: Cleanup - Delete Image
+        if: always()
+        run: |
+          echo "=== Cleanup: Deleting Image ==="
+          openstack image delete cirros-test || true
+          echo "Image deleted"
+
+      # ========================================
+      # Summary
+      # ========================================
+      - name: Test Summary
+        if: always()
+        run: |
+          echo "=================================="
+          echo "     CPI EXTENDED TEST SUMMARY    "
+          echo "=================================="
+          echo ""
+          echo "Test 1 - Security Groups:      ${{ steps.test_security_group.outcome }}"
+          echo "Test 2 - Network Config:       ${{ steps.test_network.outcome }}"
+          echo "Test 3 - VM Creation:          ${{ steps.test_vm_creation.outcome }}"
+          echo "Test 4a - Volume Create:       ${{ steps.test_volume_create.outcome }}"
+          echo "Test 4b - Volume Attach:       ${{ steps.test_volume_attach.outcome }}"
+          echo "Test 4c - Volume Detach:       ${{ steps.test_volume_detach.outcome }}"
+          echo ""
+          echo "=================================="
+
+          # Check if all tests passed
+          if [[ "${{ steps.test_security_group.outcome }}" == "success" ]] && \
+             [[ "${{ steps.test_network.outcome }}" == "success" ]] && \
+             [[ "${{ steps.test_vm_creation.outcome }}" == "success" ]] && \
+             [[ "${{ steps.test_volume_create.outcome }}" == "success" ]] && \
+             [[ "${{ steps.test_volume_attach.outcome }}" == "success" ]] && \
+             [[ "${{ steps.test_volume_detach.outcome }}" == "success" ]]; then
+            echo "✅ ALL TESTS PASSED!"
+            exit 0
+          else
+            echo "❌ SOME TESTS FAILED!"
+            exit 1
+          fi
