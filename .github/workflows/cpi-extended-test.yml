@@ -47,34 +47,14 @@ jobs:
         with:
           branch: 'stable/2025.1'
           conf_overrides: |
-            [[local|localrc]]
-            ADMIN_PASSWORD=secret
-            DATABASE_PASSWORD=secret
-            RABBIT_PASSWORD=secret
-            SERVICE_PASSWORD=secret
-
-            # Enable minimal services
-            disable_all_services
-            enable_service mysql rabbit key
-
-            # Nova (Compute)
-            enable_service n-api n-cpu n-cond n-sch
-            enable_service placement-api
-
-            # Glance (Image)
-            enable_service g-api g-reg
-
-            # Cinder (Block Storage) - NEEDED for volume tests!
-            enable_service c-sch c-api c-vol
-
-            # Neutron (Network) with OVN
-            enable_service q-svc
-            enable_service ovn-controller ovn-northd q-ovn-metadata-agent
-
-            # Log output
-            LOGFILE=/opt/stack/logs/stack.sh.log
-            VERBOSE=True
-            LOG_COLOR=False
+            FORCE=yes
+            disable_service horizon tempest
+            # Use OVN - disables legacy q-agt, q-l3, q-dhcp, q-meta
+            # Include Cinder (c-*) for volume/disk tests
+            ENABLED_SERVICES=mysql,rabbit,key,n-api,n-cpu,n-cond,n-sch,placement-api
+            ENABLED_SERVICES+=,g-api,g-reg
+            ENABLED_SERVICES+=,c-sch,c-api,c-vol
+            ENABLED_SERVICES+=,q-svc,ovn-controller,ovn-northd,q-ovn-metadata-agent
 
       - name: Wait for DevStack to stabilize
         run: sleep 30
