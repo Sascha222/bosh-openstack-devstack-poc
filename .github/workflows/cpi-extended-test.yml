@@ -273,12 +273,17 @@ jobs:
           openstack volume show test-volume
           openstack server show test-vm
 
-          # Check if volume is attached
+          # Check if volume status is "in-use" (attached)
+          STATUS=$(openstack volume show test-volume -f value -c status)
           ATTACHMENTS=$(openstack volume show test-volume -f value -c attachments)
-          if [[ "$ATTACHMENTS" == *"test-vm"* ]]; then
+
+          echo "Volume status: $STATUS"
+          echo "Attachments: $ATTACHMENTS"
+
+          if [ "$STATUS" = "in-use" ] && [ -n "$ATTACHMENTS" ] && [ "$ATTACHMENTS" != "[]" ]; then
             echo "✅ Volume successfully attached to VM!"
           else
-            echo "❌ Volume not attached!"
+            echo "❌ Volume not attached! Status: $STATUS, Attachments: $ATTACHMENTS"
             exit 1
           fi
 
