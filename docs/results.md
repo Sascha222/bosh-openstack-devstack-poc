@@ -172,6 +172,79 @@ Time:    ~30 seconds to ACTIVE
 
 ---
 
+### Run 4 - Extended CPI Operations Test ✅ (2026-07-13)
+**Status:** ✅ SUCCESS  
+**Run:** https://github.com/Sascha222/bosh-openstack-devstack-poc/actions/runs/29254127235  
+**Duration:** ~14 minutes  
+**Datum:** 2026-07-13
+
+#### Purpose:
+Validate remaining CPI operations that were not tested in Run 3:
+- Security Groups (create, add rules)
+- Network Configuration (custom networks, subnets)
+- Volume Operations (create, attach, detach)
+
+#### Tests Completed:
+```
+✅ TEST 1: Security Groups
+   - Create security group
+   - Add SSH rule (port 22)
+   - Add ICMP rule (ping)
+   - Verify rule configuration
+
+✅ TEST 2: Network Configuration
+   - Create custom network
+   - Create subnet (192.168.100.0/24)
+   - Configure DNS (8.8.8.8)
+   - Verify network/subnet details
+
+✅ TEST 3: VM with Network & Security Group
+   - Create VM on custom network
+   - Apply security group to VM
+   - Wait for ACTIVE status (~30s)
+   - Verify network attachment
+
+✅ TEST 4: Volume (Disk) Operations
+   - 4a: Create 1GB Cinder volume
+   - 4b: Attach volume to VM (status: in-use)
+   - 4c: Detach volume from VM (status: available)
+   - All operations successful
+```
+
+#### Test Results Summary:
+```
+Test 1 - Security Groups:      ✅ SUCCESS
+Test 2 - Network Config:       ✅ SUCCESS
+Test 3 - VM Creation:          ✅ SUCCESS
+Test 4a - Volume Create:       ✅ SUCCESS
+Test 4b - Volume Attach:       ✅ SUCCESS
+Test 4c - Volume Detach:       ✅ SUCCESS
+
+ALL TESTS PASSED!
+```
+
+#### Key Findings:
+```
+✅ Volume attachment works correctly
+   - Attach operation successful
+   - Volume status changes: available → in-use
+   - Device path assigned: /dev/vdb
+   - Detach operation successful
+   - Volume status returns: in-use → available
+
+✅ Custom networking works
+   - Can create custom networks and subnets
+   - VMs can be attached to custom networks
+   - OVN networking fully functional
+
+✅ Security groups functional
+   - Can create and manage security groups
+   - Can add rules (TCP, ICMP)
+   - Can apply to VMs
+```
+
+---
+
 ## Key Learnings
 
 ### Phase 1: DevStack Setup
@@ -217,10 +290,19 @@ Für funktionierendes DevStack benötigt:
    - QEMU Emulation ausreichend für kleine VMs
    - Cirros startet in ~30 Sekunden
 
-3. **CPI Simulation erfolgreich**
-   - VM Create/Delete Cycle funktioniert
+3. **CPI Operations validiert**
+   - VM Create/Delete Cycle funktioniert ✅
+   - Volume Attach/Detach funktioniert ✅
+   - Custom Networks/Subnets funktionieren ✅
+   - Security Groups funktionieren ✅
    - OpenStack APIs vollständig nutzbar
-   - Bereit für echte BOSH CPI Tests
+   
+4. **Nicht getestete Operationen**
+   - Floating IPs (external connectivity)
+   - VM Snapshots
+   - Multiple NICs per VM
+   - Volume snapshots
+   - Load balancers
 
 ---
 
