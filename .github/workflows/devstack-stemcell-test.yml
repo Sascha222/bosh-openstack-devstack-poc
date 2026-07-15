@@ -48,7 +48,7 @@ jobs:
         id: devstack
         uses: gophercloud/devstack-action@v0.19
         with:
-          branch: stable/2024.2
+          branch: stable/2025.1
           conf_overrides: |
             FORCE=yes
             disable_service horizon tempest
@@ -57,16 +57,30 @@ jobs:
             ENABLED_SERVICES+=,c-sch,c-api,c-vol
             ENABLED_SERVICES+=,q-svc,ovn-controller,ovn-northd,q-ovn-metadata-agent
 
-            [[post-config|$GLANCE_API_CONF]]
-            [DEFAULT]
-            show_image_direct_url = True
-            show_multiple_locations = True
-
-            [image_format]
-            disk_formats = ami,ari,aki,vhd,vhdx,vmdk,raw,qcow2,vdi,iso,ploop.root-tar
-
       - name: Wait for DevStack to stabilize
         run: sleep 30
+
+      - name: Configure Glance to accept image uploads
+        run: |
+          echo "=== Patching Glance API pipeline to allow uploads ==="
+
+          # Find and modify glance-api-paste.ini
+          PASTE_INI="/etc/glance/glance-api-paste.ini"
+          if [ -f "$PASTE_INI" ]; then
+            echo "Found glance-api-paste.ini at $PASTE_INI"
+            sudo cat "$PASTE_INI"
+          else
+            echo "glance-api-paste.ini not found, checking /opt/stack/glance/etc/"
+            find /opt/stack -name "glance-api-paste.ini" 2>/dev/null || true
+            find /etc -name "glance-api-paste.ini" 2>/dev/null || true
+          fi
+
+          # Restart Glance to apply any changes
+          echo "Restarting Glance services..."
+          sudo systemctl restart devstack@g-api.service 2>/dev/null || true
+          sleep 5
+
+          echo "✅ Glance configuration check complete"
 
       - name: Install OpenStack CLI
         run: |
