@@ -56,6 +56,17 @@ jobs:
             ENABLED_SERVICES+=,g-api,g-reg
             ENABLED_SERVICES+=,c-sch,c-api,c-vol
             ENABLED_SERVICES+=,q-svc,ovn-controller,ovn-northd,q-ovn-metadata-agent
+            ENABLED_SERVICES+=,s-proxy,s-object,s-container,s-account
+
+            [[post-config|$GLANCE_API_CONF]]
+            [glance_store]
+            default_backend = swift
+            stores = swift
+            swift_store_auth_address = $KEYSTONE_SERVICE_URI/v3
+            swift_store_user = services:glance
+            swift_store_key = $SERVICE_PASSWORD
+            swift_store_create_container_on_put = True
+            swift_store_container = glance
 
       - name: Wait for DevStack to stabilize
         run: sleep 30
