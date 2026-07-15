@@ -73,47 +73,49 @@ jobs:
 
       - name: Configure Glance to accept image uploads
         run: |
-          echo "=== Configuring Glance and Apache for large image uploads ==="
+          echo "=== Configuring Apache and Glance for large uploads ==="
 
-          # Configure Apache LimitRequestBody (Glance runs behind Apache!)
-          echo "Configuring Apache for large uploads..."
+          # Configure Apache - multiple directives to catch all limits
           APACHE_GLANCE="/etc/apache2/sites-available/glance-api.conf"
 
           if [ -f "$APACHE_GLANCE" ]; then
-            echo "Found Apache Glance config"
-            # Set LimitRequestBody to 0 (unlimited) or 6GB
-            sudo sed -i '/<VirtualHost/a \    LimitRequestBody 6442450944' "$APACHE_GLANCE"
-            echo "Apache config updated"
-            sudo apache2ctl configtest || true
+            echo "Configuring Apache for unlimited uploads..."
+
+            # Backup original
+            sudo cp "$APACHE_GLANCE" "$APACHE_GLANCE.backup"
+
+            # Add multiple size limit directives
+            sudo sed -i '/<VirtualHost/a \    # Allow large image uploads\n    LimitRequestBody 0\n    FcgidMaxRequestLen 0\n    WSGIChunkedRequest On' "$APACHE_GLANCE"
+
+            echo "Updated Apache config:"
+            sudo cat "$APACHE_GLANCE" | head -20
+
+            echo "Testing Apache config..."
+            sudo apache2ctl configtest
+
+            echo "Reloading Apache..."
             sudo systemctl reload apache2
+            sleep 3
+          else
+            echo "WARNING: Apache Glance config not found at $APACHE_GLANCE"
           fi
 
-          # Find and configure Glance itself
+          # Configure Glance
           GLANCE_CONF="/etc/glance/glance-api.conf"
-
           if [ -f "$GLANCE_CONF" ]; then
-            echo "Configuring Glance for large uploads..."
+            echo "Configuring Glance..."
             echo "" | sudo tee -a "$GLANCE_CONF" > /dev/null
             echo "[oslo_middleware]" | sudo tee -a "$GLANCE_CONF" > /dev/null
-            echo "max_request_body_size = 5368709120" | sudo tee -a "$GLANCE_CONF" > /dev/null
-            echo "" | sudo tee -a "$GLANCE_CONF" > /dev/null
-            echo "[DEFAULT]" | sudo tee -a "$GLANCE_CONF" > /dev/null
-            echo "image_size_cap = 5368709120" | sudo tee -a "$GLANCE_CONF" > /dev/null
+            echo "max_request_body_size = 0" | sudo tee -a "$GLANCE_CONF" > /dev/null
           fi
 
-          # Configure Swift proxy for large objects
+          # Configure Swift
           SWIFT_PROXY_CONF=$(find /etc /opt/stack -name "proxy-server.conf" 2>/dev/null | head -1)
-
           if [ -n "$SWIFT_PROXY_CONF" ]; then
-            echo "Configuring Swift proxy..."
-            sudo sed -i 's/max_file_size = .*/max_file_size = 5368709120/' "$SWIFT_PROXY_CONF" || true
+            echo "Configuring Swift..."
+            sudo sed -i 's/max_file_size = .*/max_file_size = 10737418240/' "$SWIFT_PROXY_CONF" || true
+            sudo systemctl restart devstack@s-proxy.service 2>/dev/null || true
           fi
-
-          # Restart services
-          echo "Restarting services..."
-          sudo systemctl reload apache2 2>/dev/null || true
-          sudo systemctl restart devstack@s-proxy.service 2>/dev/null || true
-          sleep 10
 
           echo "✅ Configuration complete"
 
