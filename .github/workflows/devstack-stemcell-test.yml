@@ -79,14 +79,12 @@ jobs:
           GLANCE_CONF="/etc/glance/glance-api.conf"
 
           echo "Adding large request body configuration to Glance..."
-          sudo tee -a "$GLANCE_CONF" > /dev/null <<'EOF'
-
-[oslo_middleware]
-max_request_body_size = 2147483648
-
-[DEFAULT]
-image_size_cap = 2147483648
-EOF
+          echo "" | sudo tee -a "$GLANCE_CONF" > /dev/null
+          echo "[oslo_middleware]" | sudo tee -a "$GLANCE_CONF" > /dev/null
+          echo "max_request_body_size = 2147483648" | sudo tee -a "$GLANCE_CONF" > /dev/null
+          echo "" | sudo tee -a "$GLANCE_CONF" > /dev/null
+          echo "[DEFAULT]" | sudo tee -a "$GLANCE_CONF" > /dev/null
+          echo "image_size_cap = 2147483648" | sudo tee -a "$GLANCE_CONF" > /dev/null
 
           # Also configure Swift proxy for large objects
           SWIFT_PROXY_CONF="/etc/swift/proxy-server.conf"
