@@ -73,64 +73,49 @@ jobs:
 
       - name: Configure Glance to accept image uploads
         run: |
-          echo "=== Configuring Glance for large image uploads ==="
+          echo "=== Configuring Glance and Apache for large image uploads ==="
 
-          # Find the actual Glance config location
-          echo "Searching for Glance config files..."
-          find /etc /opt/stack -name "glance-api.conf" 2>/dev/null || true
+          # Configure Apache LimitRequestBody (Glance runs behind Apache!)
+          echo "Configuring Apache for large uploads..."
+          APACHE_GLANCE="/etc/apache2/sites-available/glance-api.conf"
 
-          GLANCE_CONF=$(find /etc /opt/stack -name "glance-api.conf" 2>/dev/null | head -1)
-
-          if [ -z "$GLANCE_CONF" ]; then
-            echo "ERROR: glance-api.conf not found!"
-            exit 1
+          if [ -f "$APACHE_GLANCE" ]; then
+            echo "Found Apache Glance config"
+            # Set LimitRequestBody to 0 (unlimited) or 6GB
+            sudo sed -i '/<VirtualHost/a \    LimitRequestBody 6442450944' "$APACHE_GLANCE"
+            echo "Apache config updated"
+            sudo apache2ctl configtest || true
+            sudo systemctl reload apache2
           fi
 
-          echo "Found Glance config at: $GLANCE_CONF"
+          # Find and configure Glance itself
+          GLANCE_CONF="/etc/glance/glance-api.conf"
 
-          echo "Current Glance config (last 20 lines):"
-          sudo tail -20 "$GLANCE_CONF"
+          if [ -f "$GLANCE_CONF" ]; then
+            echo "Configuring Glance for large uploads..."
+            echo "" | sudo tee -a "$GLANCE_CONF" > /dev/null
+            echo "[oslo_middleware]" | sudo tee -a "$GLANCE_CONF" > /dev/null
+            echo "max_request_body_size = 5368709120" | sudo tee -a "$GLANCE_CONF" > /dev/null
+            echo "" | sudo tee -a "$GLANCE_CONF" > /dev/null
+            echo "[DEFAULT]" | sudo tee -a "$GLANCE_CONF" > /dev/null
+            echo "image_size_cap = 5368709120" | sudo tee -a "$GLANCE_CONF" > /dev/null
+          fi
 
-          echo ""
-          echo "Adding large request body configuration to Glance..."
-          echo "" | sudo tee -a "$GLANCE_CONF" > /dev/null
-          echo "[oslo_middleware]" | sudo tee -a "$GLANCE_CONF" > /dev/null
-          echo "max_request_body_size = 5368709120" | sudo tee -a "$GLANCE_CONF" > /dev/null
-          echo "" | sudo tee -a "$GLANCE_CONF" > /dev/null
-          echo "[DEFAULT]" | sudo tee -a "$GLANCE_CONF" > /dev/null
-          echo "image_size_cap = 5368709120" | sudo tee -a "$GLANCE_CONF" > /dev/null
-
-          echo ""
-          echo "Updated config (last 20 lines):"
-          sudo tail -20 "$GLANCE_CONF"
-
-          # Also configure Swift proxy for large objects
-          echo ""
-          echo "Searching for Swift config..."
-          find /etc /opt/stack -name "proxy-server.conf" 2>/dev/null || true
-
+          # Configure Swift proxy for large objects
           SWIFT_PROXY_CONF=$(find /etc /opt/stack -name "proxy-server.conf" 2>/dev/null | head -1)
 
           if [ -n "$SWIFT_PROXY_CONF" ]; then
-            echo "Found Swift proxy config at: $SWIFT_PROXY_CONF"
-            echo "Current max_file_size setting:"
-            grep -i "max_file_size" "$SWIFT_PROXY_CONF" || echo "Not set"
-
-            echo "Configuring Swift proxy for large uploads..."
+            echo "Configuring Swift proxy..."
             sudo sed -i 's/max_file_size = .*/max_file_size = 5368709120/' "$SWIFT_PROXY_CONF" || true
-
-            echo "Updated max_file_size setting:"
-            grep -i "max_file_size" "$SWIFT_PROXY_CONF" || echo "Not set"
           fi
 
-          # Restart Glance and Swift services
-          echo ""
+          # Restart services
           echo "Restarting services..."
-          sudo systemctl restart devstack@g-api.service 2>/dev/null || true
+          sudo systemctl reload apache2 2>/dev/null || true
           sudo systemctl restart devstack@s-proxy.service 2>/dev/null || true
           sleep 10
 
-          echo "✅ Glance configuration updated for large uploads"
+          echo "✅ Configuration complete"
 
       - name: Install OpenStack CLI
         run: |
