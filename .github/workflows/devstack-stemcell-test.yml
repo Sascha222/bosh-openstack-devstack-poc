@@ -193,12 +193,17 @@ jobs:
           echo "Image size: $IMAGE_SIZE"
 
           # Create image in Glance
+          # Use two-step process: create then upload
+          # Some Glance versions have issues with direct --file upload
+          echo "Creating image metadata..."
           openstack image create \
             --disk-format qcow2 \
             --container-format bare \
             --public \
-            --file "$IMAGE_FILE" \
             bosh-stemcell-test
+
+          echo "Uploading image data..."
+          openstack image set --file "$IMAGE_FILE" bosh-stemcell-test
 
           echo "=== Waiting for image to become active ==="
           for i in {1..30}; do
