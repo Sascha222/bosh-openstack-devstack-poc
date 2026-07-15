@@ -48,7 +48,7 @@ jobs:
         id: devstack
         uses: gophercloud/devstack-action@v0.19
         with:
-          branch: stable/2025.1
+          branch: stable/2024.2
           conf_overrides: |
             FORCE=yes
             disable_service horizon tempest
