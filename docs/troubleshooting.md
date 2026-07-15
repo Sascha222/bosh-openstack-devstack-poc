@@ -262,11 +262,76 @@ bash: /opt/stack/devstack/openrc: No such file or directory
 
 | Limitation | Impact | Workaround |
 |------------|--------|-----------|
-| **14GB Disk** | DevStack braucht ~10GB | Aggressive Cleanup ✅ |
-| **2 CPU Cores** | DevStack ist langsam (~30 Min) | Timeout auf 90 Min setzen ✅ |
+| **110GB Disk (after cleanup)** | Sufficient for stemcells (~3GB) | Aggressive Cleanup ✅ |
+| **2 CPU Cores** | DevStack ist langsam (~30 Min) | Timeout auf 90-120 Min setzen ✅ |
 | **7GB RAM** | Kann für Multi-Node zu wenig sein | Single-Node DevStack nutzen ✅ |
 | **Keine Nested Virtualization** | KVM funktioniert nicht | QEMU Emulation (langsam) |
 | **OpenDev Rate Limits** | Git Clone kann fehlschlagen | Manual Install als Fallback ✅ |
+| **Glance Upload Limit** | Cannot upload images >1GB (413 error) | Use pre-uploaded images or external Glance ⚠️ |
+
+---
+
+## Problem: Glance 413 Request Entity Too Large
+
+**Added:** 2026-07-15
+
+**Symptom:**
+```
+HttpException: 413: Client Error for url: http://10.1.0.X/image/v2/images/XXX/file, Request Entity Too Large
+```
+
+**When it happens:**
+Trying to upload large images (>1GB) to DevStack's Glance service, e.g., BOSH stemcells (~1.3GB)
+
+**Root Cause:**
+DevStack 2025.1 Glance runs behind Apache with strict upload limits. Multiple configuration points block large uploads:
+- Apache `LimitRequestBody`
+- Glance `max_request_body_size`
+- Swift backend `max_file_size`
+
+**Attempted Fixes (all failed):**
+1. Configure Apache `LimitRequestBody 0` (unlimited)
+2. Set Glance `max_request_body_size = 0`
+3. Enable Swift backend with increased limits
+4. Add `WSGIChunkedRequest On`
+5. Configure `FcgidMaxRequestLen`
+
+**Result:** Persistent 413 error after 15+ configuration attempts
+
+**Workaround:**
+- Skip Glance upload in tests
+- Verify stemcell integrity with `qemu-img info` instead
+- For actual VM testing: pre-upload small test images (Cirros ~13MB) or use external Glance
+
+**Status:** Documented limitation in `docs/devstack-poc-limitations.csv`
+
+**Related:**
+- Workflow: `.github/workflows/devstack-stemcell-test.yml`
+- Test run: https://github.com/Sascha222/bosh-openstack-devstack-poc/actions/runs/[RUN_ID]
+
+---
+
+## Problem: Stemcell Download on GitHub Actions
+
+**Added:** 2026-07-15
+
+**Previous assumption:** GitHub Actions only has 14GB disk → too small for stemcells
+
+**Reality:** ✅ ubuntu-24.04 runners have ~145GB total / ~110GB after cleanup
+
+**Solution:**
+Real BOSH stemcells (~3GB) CAN be downloaded on GitHub Actions!
+
+**Steps:**
+1. Aggressive disk cleanup (remove dotnet, ghc, android, etc.)
+2. Download stemcell from bosh.io API
+3. Extract and verify with `qemu-img info`
+
+**Result:** Download and extraction successful, disk space sufficient
+
+**Limitation:** While download works, uploading to Glance fails (see "Glance 413" above)
+
+**Workflow:** `.github/workflows/devstack-stemcell-test.yml`
 
 ---
 
