@@ -73,25 +73,35 @@ jobs:
 
       - name: Configure Glance to accept image uploads
         run: |
-          echo "=== Patching Glance API pipeline to allow uploads ==="
+          echo "=== Configuring Glance for large image uploads ==="
 
-          # Find and modify glance-api-paste.ini
-          PASTE_INI="/etc/glance/glance-api-paste.ini"
-          if [ -f "$PASTE_INI" ]; then
-            echo "Found glance-api-paste.ini at $PASTE_INI"
-            sudo cat "$PASTE_INI"
-          else
-            echo "glance-api-paste.ini not found, checking /opt/stack/glance/etc/"
-            find /opt/stack -name "glance-api-paste.ini" 2>/dev/null || true
-            find /etc -name "glance-api-paste.ini" 2>/dev/null || true
+          # Increase client_max_body_size for large uploads
+          GLANCE_CONF="/etc/glance/glance-api.conf"
+
+          echo "Adding large request body configuration to Glance..."
+          sudo tee -a "$GLANCE_CONF" > /dev/null <<EOF
+
+[oslo_middleware]
+max_request_body_size = 2147483648
+
+[DEFAULT]
+image_size_cap = 2147483648
+EOF
+
+          # Also configure Swift proxy for large objects
+          SWIFT_PROXY_CONF="/etc/swift/proxy-server.conf"
+          if [ -f "$SWIFT_PROXY_CONF" ]; then
+            echo "Configuring Swift proxy for large uploads..."
+            sudo sed -i 's/max_file_size = .*/max_file_size = 5368709120/' "$SWIFT_PROXY_CONF" || true
           fi
 
-          # Restart Glance to apply any changes
-          echo "Restarting Glance services..."
+          # Restart Glance and Swift services
+          echo "Restarting services..."
           sudo systemctl restart devstack@g-api.service 2>/dev/null || true
+          sudo systemctl restart devstack@s-proxy.service 2>/dev/null || true
           sleep 5
 
-          echo "✅ Glance configuration check complete"
+          echo "✅ Glance configuration updated for large uploads"
 
       - name: Install OpenStack CLI
         run: |
