@@ -192,22 +192,24 @@ jobs:
           IMAGE_SIZE=$(du -h "$IMAGE_FILE" | cut -f1)
           echo "Image size: $IMAGE_SIZE"
 
-          # Create image in Glance
-          # Use two-step process: create then upload
-          # Some Glance versions have issues with direct --file upload
-          echo "Creating image metadata..."
-          openstack image create \
+          # Install glance client for direct upload (works around 415 error)
+          echo "Installing python-glanceclient..."
+          python3 -m pip install --user python-glanceclient
+          export PATH=$PATH:$HOME/.local/bin
+
+          # Use glance CLI directly instead of openstack image
+          # This avoids the Content-Type header issues with some Glance versions
+          echo "Creating and uploading image with glance CLI..."
+          glance image-create \
+            --name bosh-stemcell-test \
             --disk-format qcow2 \
             --container-format bare \
-            --public \
-            bosh-stemcell-test
-
-          echo "Uploading image data..."
-          openstack image set --file "$IMAGE_FILE" bosh-stemcell-test
+            --visibility public \
+            --file "$IMAGE_FILE"
 
           echo "=== Waiting for image to become active ==="
           for i in {1..30}; do
-            STATUS=$(openstack image show bosh-stemcell-test -f value -c status)
+            STATUS=$(openstack image show bosh-stemcell-test -f value -c status 2>/dev/null || echo "UNKNOWN")
             echo "Attempt $i/30: Image status = $STATUS"
 
             if [ "$STATUS" = "active" ]; then
