@@ -192,20 +192,32 @@ jobs:
           IMAGE_SIZE=$(du -h "$IMAGE_FILE" | cut -f1)
           echo "Image size: $IMAGE_SIZE"
 
-          # Install glance client for direct upload (works around 415 error)
-          echo "Installing python-glanceclient..."
-          python3 -m pip install --user python-glanceclient
-          export PATH=$PATH:$HOME/.local/bin
+          # Workaround for Glance 415 error: Use web-download instead of direct upload
+          # Start a simple HTTP server to serve the image file
+          echo "Starting temporary HTTP server..."
+          python3 -m http.server 8888 --bind 127.0.0.1 &
+          HTTP_PID=$!
+          sleep 2
 
-          # Use glance CLI directly instead of openstack image
-          # This avoids the Content-Type header issues with some Glance versions
-          echo "Creating and uploading image with glance CLI..."
-          glance image-create \
-            --name bosh-stemcell-test \
+          # Create image and import from local HTTP server
+          echo "Creating image with web-download method..."
+          openstack image create \
             --disk-format qcow2 \
             --container-format bare \
-            --visibility public \
-            --file "$IMAGE_FILE"
+            --public \
+            bosh-stemcell-test
+
+          # Import the image data from local HTTP URL
+          IMAGE_ID=$(openstack image show bosh-stemcell-test -f value -c id)
+          echo "Image ID: $IMAGE_ID"
+
+          echo "Importing image data from local HTTP server..."
+          openstack image set \
+            --location "http://127.0.0.1:8888/$IMAGE_FILE" \
+            bosh-stemcell-test
+
+          # Stop HTTP server
+          kill $HTTP_PID 2>/dev/null || true
 
           echo "=== Waiting for image to become active ==="
           for i in {1..30}; do
