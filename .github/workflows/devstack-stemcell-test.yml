@@ -82,8 +82,8 @@ jobs:
           echo "OS_USERNAME=$OS_USERNAME" >> $GITHUB_ENV
           echo "OS_PASSWORD=$OS_PASSWORD" >> $GITHUB_ENV
           echo "OS_PROJECT_NAME=$OS_PROJECT_NAME" >> $GITHUB_ENV
-          echo "OS_USER_DOMAIN_NAME=$OS_USER_DOMAIN_NAME" >> $GITHUB_ENV
-          echo "OS_PROJECT_DOMAIN_NAME=$OS_PROJECT_DOMAIN_NAME" >> $GITHUB_ENV
+          echo "OS_USER_DOMAIN_NAME=${OS_USER_DOMAIN_NAME:-Default}" >> $GITHUB_ENV
+          echo "OS_PROJECT_DOMAIN_NAME=${OS_PROJECT_DOMAIN_NAME:-Default}" >> $GITHUB_ENV
           echo "OS_IDENTITY_API_VERSION=3" >> $GITHUB_ENV
 
       - name: Download BOSH Stemcell
