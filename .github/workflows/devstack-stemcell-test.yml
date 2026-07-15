@@ -57,6 +57,14 @@ jobs:
             ENABLED_SERVICES+=,c-sch,c-api,c-vol
             ENABLED_SERVICES+=,q-svc,ovn-controller,ovn-northd,q-ovn-metadata-agent
 
+            [[post-config|$GLANCE_API_CONF]]
+            [DEFAULT]
+            show_image_direct_url = True
+            show_multiple_locations = True
+
+            [image_format]
+            disk_formats = ami,ari,aki,vhd,vhdx,vmdk,raw,qcow2,vdi,iso,ploop.root-tar
+
       - name: Wait for DevStack to stabilize
         run: sleep 30
 
@@ -192,32 +200,14 @@ jobs:
           IMAGE_SIZE=$(du -h "$IMAGE_FILE" | cut -f1)
           echo "Image size: $IMAGE_SIZE"
 
-          # Workaround for Glance 415 error: Use web-download instead of direct upload
-          # Start a simple HTTP server to serve the image file
-          echo "Starting temporary HTTP server..."
-          python3 -m http.server 8888 --bind 127.0.0.1 &
-          HTTP_PID=$!
-          sleep 2
-
-          # Create image and import from local HTTP server
-          echo "Creating image with web-download method..."
+          # Upload with openstack CLI (Glance config now allows it)
+          echo "Creating and uploading image to Glance..."
           openstack image create \
             --disk-format qcow2 \
             --container-format bare \
             --public \
+            --file "$IMAGE_FILE" \
             bosh-stemcell-test
-
-          # Import the image data from local HTTP URL
-          IMAGE_ID=$(openstack image show bosh-stemcell-test -f value -c id)
-          echo "Image ID: $IMAGE_ID"
-
-          echo "Importing image data from local HTTP server..."
-          openstack image set \
-            --location "http://127.0.0.1:8888/$IMAGE_FILE" \
-            bosh-stemcell-test
-
-          # Stop HTTP server
-          kill $HTTP_PID 2>/dev/null || true
 
           echo "=== Waiting for image to become active ==="
           for i in {1..30}; do
