@@ -79,7 +79,7 @@ jobs:
           GLANCE_CONF="/etc/glance/glance-api.conf"
 
           echo "Adding large request body configuration to Glance..."
-          sudo tee -a "$GLANCE_CONF" > /dev/null <<EOF
+          sudo tee -a "$GLANCE_CONF" > /dev/null <<'EOF'
 
 [oslo_middleware]
 max_request_body_size = 2147483648
