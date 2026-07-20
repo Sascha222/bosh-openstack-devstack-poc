@@ -374,9 +374,12 @@ jobs:
           echo "Step 2: Uploading image binary data..."
           echo "⏳ This will take several minutes for a ~1.3GB stemcell..."
           echo ""
+          echo "Upload URL: ${GLANCE_ENDPOINT}/v2/images/${IMAGE_ID}/file"
+          echo ""
 
           # CRITICAL: Content-Type MUST be application/octet-stream for binary data!
-          HTTP_RESPONSE=$(curl -w "\nHTTP_CODE:%{http_code}" -X PUT \
+          # Use --fail-with-body to get error details if upload fails
+          HTTP_RESPONSE=$(curl -v --fail-with-body -w "\nHTTP_CODE:%{http_code}" -X PUT \
             -H "X-Auth-Token: $AUTH_TOKEN" \
             -H "Content-Type: application/octet-stream" \
             --data-binary @image \
@@ -386,11 +389,20 @@ jobs:
 
           echo ""
           echo "HTTP Response Code: $HTTP_CODE"
+          echo ""
 
           if [ "$HTTP_CODE" != "204" ] && [ "$HTTP_CODE" != "200" ]; then
             echo "❌ Upload failed with HTTP $HTTP_CODE"
-            echo "Response:"
-            echo "$HTTP_RESPONSE" | grep -v "HTTP_CODE:"
+            echo ""
+            echo "Full Response:"
+            echo "$HTTP_RESPONSE"
+            echo ""
+            echo "Checking if it's a 413 (Request Entity Too Large) or 415 (Unsupported Media Type)..."
+            if echo "$HTTP_RESPONSE" | grep -q "413"; then
+              echo "❌ 413 error - Apache size limit still blocking!"
+            elif echo "$HTTP_RESPONSE" | grep -q "415"; then
+              echo "❌ 415 error - Content-Type still not accepted!"
+            fi
             exit 1
           fi
 
