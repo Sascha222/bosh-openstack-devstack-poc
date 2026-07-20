@@ -89,7 +89,7 @@ jobs:
           # Backup original
           sudo cp "$APACHE_GLANCE_CONF" "${APACHE_GLANCE_CONF}.backup"
 
-          # Extract the original Glance API port (DevStack uses a non-standard port)
+          # Extract the original Glance API port
           GLANCE_PORT=$(sudo grep -oP 'http://127.0.0.1:\K[0-9]+' "$APACHE_GLANCE_CONF" | head -1)
           if [ -z "$GLANCE_PORT" ]; then
             GLANCE_PORT="9292"  # fallback to default
@@ -97,21 +97,32 @@ jobs:
           echo "Detected Glance API port: $GLANCE_PORT"
           echo ""
 
-          # THE CRITICAL FIX: Add LimitRequestBody 0 + increase ProxyTimeout
-          # Keep the existing SetEnv proxy-sendchunked 1 (DevStack already has it!)
-          # Do NOT use WSGIChunkedRequest (it's not a valid Apache directive)
+          # CRITICAL FIX: Apache is rejecting application/octet-stream!
+          # We need to ensure mod_proxy is loaded and configured properly
+          echo "Enabling required Apache modules..."
+          sudo a2enmod proxy proxy_http headers rewrite 2>/dev/null || true
+
+          # Create MINIMAL config that just proxies everything through
+          # The key is: NO restrictions on Content-Type at Apache level!
           sudo tee "$APACHE_GLANCE_CONF" > /dev/null <<EOF
+          # CRITICAL: Disable KeepAlive to avoid connection issues
           KeepAlive Off
+
+          # CRITICAL: Enable chunked requests
           SetEnv proxy-sendchunked 1
 
           # CRITICAL: Allow unlimited request body size
           LimitRequestBody 0
 
-          # CRITICAL: Long timeout for large uploads (1.3GB can take several minutes)
+          # CRITICAL: Long timeout for large uploads
           ProxyTimeout 3600
 
-          # Proxy to Glance API (preserve original port)
+          # Proxy ALL requests to Glance API (no filtering!)
           ProxyPass "/image" "http://127.0.0.1:${GLANCE_PORT}" retry=0 acquire=1
+          ProxyPassReverse "/image" "http://127.0.0.1:${GLANCE_PORT}"
+
+          # CRITICAL: Don't filter Content-Type headers!
+          ProxyPreserveHost On
           EOF
 
           echo "=== AFTER (fixed config) ==="
@@ -127,7 +138,14 @@ jobs:
           sudo systemctl reload apache2
           sleep 5
 
-          echo "✅ Apache configured for large uploads!"
+          # Verify Apache is running
+          if ! sudo systemctl is-active --quiet apache2; then
+            echo "ERROR: Apache failed to reload!"
+            sudo systemctl status apache2 --no-pager
+            exit 1
+          fi
+
+          echo "✅ Apache configured and reloaded successfully!"
 
       - name: Configure Glance for Large Uploads
         run: |
