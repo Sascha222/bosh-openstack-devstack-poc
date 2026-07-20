@@ -138,16 +138,38 @@ jobs:
           if [ -f "$GLANCE_CONF" ]; then
             echo "Configuring Glance..."
 
+            # Backup original
+            sudo cp "$GLANCE_CONF" "${GLANCE_CONF}.backup"
+
             # Set unlimited body size in Glance
             if ! grep -q "max_request_body_size" "$GLANCE_CONF"; then
               echo "" | sudo tee -a "$GLANCE_CONF" > /dev/null
               echo "[oslo_middleware]" | sudo tee -a "$GLANCE_CONF" > /dev/null
               echo "max_request_body_size = 0" | sudo tee -a "$GLANCE_CONF" > /dev/null
-
-              # Restart Glance API
-              sudo systemctl restart devstack@g-api.service || true
-              sleep 5
             fi
+
+            # CRITICAL FIX for 415 error: Disable strict image format matching
+            # BOSH stemcells may not match qcow2 format exactly, causing 415 errors
+            # See: https://docs.openstack.org/glance/2025.1/configuration/glance_api.html#image_format.require_image_format_match
+            if ! grep -q "\[image_format\]" "$GLANCE_CONF"; then
+              echo "" | sudo tee -a "$GLANCE_CONF" > /dev/null
+              echo "[image_format]" | sudo tee -a "$GLANCE_CONF" > /dev/null
+              echo "require_image_format_match = False" | sudo tee -a "$GLANCE_CONF" > /dev/null
+            else
+              # Update existing section
+              sudo sed -i '/\[image_format\]/a require_image_format_match = False' "$GLANCE_CONF"
+            fi
+
+            echo ""
+            echo "=== Glance Config (relevant sections) ==="
+            sudo grep -A 5 "\[oslo_middleware\]" "$GLANCE_CONF" || true
+            sudo grep -A 5 "\[image_format\]" "$GLANCE_CONF" || true
+            echo ""
+
+            # Restart Glance API
+            echo "Restarting Glance API..."
+            sudo systemctl restart devstack@g-api.service || true
+            sleep 10
 
             echo "✅ Glance configured"
           else
