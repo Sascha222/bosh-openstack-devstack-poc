@@ -309,8 +309,8 @@ jobs:
           echo "=========================================="
           echo ""
           echo "THIS IS THE CRITICAL TEST!"
-          echo "Previous attempts failed with 413 error."
-          echo "Now testing with fixed Apache config..."
+          echo "Previous 415 errors were caused by missing/wrong Content-Type header."
+          echo "Now using direct Glance API with explicit Content-Type..."
           echo ""
 
           cd ~/stemcells/stemcell-extracted
@@ -325,31 +325,45 @@ jobs:
           echo "  Size: ${IMAGE_SIZE_MB}MB (~${IMAGE_SIZE_GB}GB)"
           echo ""
 
-          # CRITICAL: Create AND upload in one command (avoids 415 error)
-          # The 415 error happens when we create the image first, then try to upload separately
-          echo "Creating and uploading image to Glance (in one command)..."
-          echo "⏳ This will take several minutes for a ~1.3GB stemcell..."
-          echo ""
-
-          # Use openstack image create with --file parameter
-          # This does create + upload in one atomic operation
+          # Step 1: Create empty image in Glance (metadata only)
+          echo "Step 1: Creating image metadata in Glance..."
           IMAGE_ID=$(openstack image create \
             --disk-format qcow2 \
             --container-format bare \
             --private \
             --property os_type=linux \
             --property os_distro=ubuntu \
-            --file image \
             "bosh-stemcell-${STEMCELL_VERSION}-test" \
             -f value -c id)
 
+          echo "Image ID: $IMAGE_ID"
+          echo ""
+
+          # Step 2: Upload image data using curl with EXPLICIT Content-Type
+          # This is the FIX for 415 error - we MUST set Content-Type: application/octet-stream
+          echo "Step 2: Uploading image data with explicit Content-Type..."
+          echo "⏳ This will take several minutes for a ~1.3GB stemcell..."
+          echo ""
+
+          # Get Glance endpoint
+          GLANCE_ENDPOINT=$(openstack catalog show glance -f value -c endpoints | grep public | awk '{print $2}')
+          echo "Glance endpoint: $GLANCE_ENDPOINT"
+
+          # Upload with curl and explicit Content-Type header
+          # CRITICAL: Content-Type MUST be application/octet-stream for binary data!
+          curl -i -X PUT \
+            -H "X-Auth-Token: $OS_PASSWORD" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @image \
+            "${GLANCE_ENDPOINT}/v2/images/${IMAGE_ID}/file"
+
           echo ""
           echo "✅ Upload command completed!"
-          echo "Image ID: $IMAGE_ID"
           echo ""
 
           # Verify upload
           echo "Verifying image status..."
+          sleep 5
           openstack image show "$IMAGE_ID"
 
           IMAGE_STATUS=$(openstack image show "$IMAGE_ID" -f value -c status)
@@ -360,11 +374,11 @@ jobs:
             echo ""
             echo "🎉 SUCCESS! Stemcell uploaded to Glance!"
             echo ""
-            echo "This confirms the Apache fix works!"
+            echo "The 415 error is fixed with explicit Content-Type!"
           else
             echo ""
             echo "⚠️ Image status is not 'active': $IMAGE_STATUS"
-            echo "Checking if it's still uploading..."
+            echo "Waiting for upload to finalize..."
 
             # Wait up to 5 minutes for upload to complete
             for i in {1..60}; do
