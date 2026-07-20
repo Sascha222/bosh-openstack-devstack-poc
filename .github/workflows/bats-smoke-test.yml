@@ -89,37 +89,29 @@ jobs:
           # Backup original
           sudo cp "$APACHE_GLANCE_CONF" "${APACHE_GLANCE_CONF}.backup"
 
-          # THE CRITICAL FIX: Disable proxy buffering + set unlimited size
-          # This is what the SAP documentation recommends!
-          sudo tee "$APACHE_GLANCE_CONF" > /dev/null <<'EOF'
-          <VirtualHost *:80>
-            ServerName glance-api
+          # Extract the original Glance API port (DevStack uses a non-standard port)
+          GLANCE_PORT=$(sudo grep -oP 'http://127.0.0.1:\K[0-9]+' "$APACHE_GLANCE_CONF" | head -1)
+          if [ -z "$GLANCE_PORT" ]; then
+            GLANCE_PORT="9292"  # fallback to default
+          fi
+          echo "Detected Glance API port: $GLANCE_PORT"
+          echo ""
 
-            # CRITICAL: Allow unlimited request body size
-            LimitRequestBody 0
+          # THE CRITICAL FIX: Add LimitRequestBody 0 + increase ProxyTimeout
+          # Keep the existing SetEnv proxy-sendchunked 1 (DevStack already has it!)
+          # Do NOT use WSGIChunkedRequest (it's not a valid Apache directive)
+          sudo tee "$APACHE_GLANCE_CONF" > /dev/null <<EOF
+          KeepAlive Off
+          SetEnv proxy-sendchunked 1
 
-            # CRITICAL: Disable request buffering (like nginx proxy_request_buffer: false)
-            # This prevents Apache from buffering the entire upload before forwarding
-            SetEnv proxy-sendchunked 1
+          # CRITICAL: Allow unlimited request body size
+          LimitRequestBody 0
 
-            # Allow chunked requests
-            WSGIChunkedRequest On
+          # CRITICAL: Long timeout for large uploads (1.3GB can take several minutes)
+          ProxyTimeout 3600
 
-            # Additional size limits (backup)
-            FcgidMaxRequestLen 0
-
-            # Proxy to Glance API
-            ProxyPass / http://127.0.0.1:9292/
-            ProxyPassReverse / http://127.0.0.1:9292/
-
-            # Keep connections alive for large uploads
-            ProxyTimeout 3600
-            KeepAlive On
-            KeepAliveTimeout 3600
-
-            ErrorLog ${APACHE_LOG_DIR}/glance-api-error.log
-            CustomLog ${APACHE_LOG_DIR}/glance-api-access.log combined
-          </VirtualHost>
+          # Proxy to Glance API (preserve original port)
+          ProxyPass "/image" "http://127.0.0.1:${GLANCE_PORT}" retry=0 acquire=1
           EOF
 
           echo "=== AFTER (fixed config) ==="
