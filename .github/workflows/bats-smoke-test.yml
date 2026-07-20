@@ -309,14 +309,13 @@ jobs:
           echo "=========================================="
           echo ""
           echo "THIS IS THE CRITICAL TEST!"
-          echo "Previous 415 errors were caused by missing/wrong Content-Type header."
-          echo "Now using direct Glance API with explicit Content-Type..."
+          echo "Using direct Glance v2 API with proper authentication..."
           echo ""
 
           cd ~/stemcells/stemcell-extracted
 
           # Get image size
-          IMAGE_SIZE_BYTES=$(stat -f%z image 2>/dev/null || stat -c%s image)
+          IMAGE_SIZE_BYTES=$(stat -c%s image)
           IMAGE_SIZE_MB=$(($IMAGE_SIZE_BYTES / 1024 / 1024))
           IMAGE_SIZE_GB=$(echo "scale=2; $IMAGE_SIZE_MB / 1024" | bc)
 
@@ -325,56 +324,85 @@ jobs:
           echo "  Size: ${IMAGE_SIZE_MB}MB (~${IMAGE_SIZE_GB}GB)"
           echo ""
 
-          # Step 1: Create empty image in Glance (metadata only)
-          echo "Step 1: Creating image metadata in Glance..."
-          IMAGE_ID=$(openstack image create \
-            --disk-format qcow2 \
-            --container-format bare \
-            --private \
-            --property os_type=linux \
-            --property os_distro=ubuntu \
-            "bosh-stemcell-${STEMCELL_VERSION}-test" \
-            -f value -c id)
+          # Get Glance endpoint and auth token
+          GLANCE_ENDPOINT=$(openstack catalog show glance -f value -c endpoints | grep public | awk '{print $2}')
+          AUTH_TOKEN=$(openstack token issue -f value -c id)
 
-          echo "Image ID: $IMAGE_ID"
+          echo "Glance endpoint: $GLANCE_ENDPOINT"
+          echo "Auth token: ${AUTH_TOKEN:0:20}..."
+          echo ""
+
+          # Step 1: Create empty image in Glance via API (metadata only, NO upload yet!)
+          echo "Step 1: Creating image metadata via Glance API..."
+
+          IMAGE_CREATE_RESPONSE=$(curl -s -X POST \
+            -H "X-Auth-Token: $AUTH_TOKEN" \
+            -H "Content-Type: application/json" \
+            "${GLANCE_ENDPOINT}/v2/images" \
+            -d '{
+              "name": "bosh-stemcell-'"${STEMCELL_VERSION}"'-test",
+              "disk_format": "qcow2",
+              "container_format": "bare",
+              "visibility": "private",
+              "os_type": "linux",
+              "os_distro": "ubuntu"
+            }')
+
+          IMAGE_ID=$(echo "$IMAGE_CREATE_RESPONSE" | jq -r '.id')
+
+          if [ "$IMAGE_ID" = "null" ] || [ -z "$IMAGE_ID" ]; then
+            echo "ERROR: Failed to create image!"
+            echo "Response: $IMAGE_CREATE_RESPONSE"
+            exit 1
+          fi
+
+          echo "✅ Image created with ID: $IMAGE_ID"
           echo ""
 
           # Step 2: Upload image data using curl with EXPLICIT Content-Type
-          # This is the FIX for 415 error - we MUST set Content-Type: application/octet-stream
-          echo "Step 2: Uploading image data with explicit Content-Type..."
+          echo "Step 2: Uploading image binary data..."
           echo "⏳ This will take several minutes for a ~1.3GB stemcell..."
           echo ""
 
-          # Get Glance endpoint
-          GLANCE_ENDPOINT=$(openstack catalog show glance -f value -c endpoints | grep public | awk '{print $2}')
-          echo "Glance endpoint: $GLANCE_ENDPOINT"
-
-          # Upload with curl and explicit Content-Type header
           # CRITICAL: Content-Type MUST be application/octet-stream for binary data!
-          curl -i -X PUT \
-            -H "X-Auth-Token: $OS_PASSWORD" \
+          HTTP_RESPONSE=$(curl -w "\nHTTP_CODE:%{http_code}" -X PUT \
+            -H "X-Auth-Token: $AUTH_TOKEN" \
             -H "Content-Type: application/octet-stream" \
             --data-binary @image \
-            "${GLANCE_ENDPOINT}/v2/images/${IMAGE_ID}/file"
+            "${GLANCE_ENDPOINT}/v2/images/${IMAGE_ID}/file" 2>&1)
+
+          HTTP_CODE=$(echo "$HTTP_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
 
           echo ""
-          echo "✅ Upload command completed!"
+          echo "HTTP Response Code: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "204" ] && [ "$HTTP_CODE" != "200" ]; then
+            echo "❌ Upload failed with HTTP $HTTP_CODE"
+            echo "Response:"
+            echo "$HTTP_RESPONSE" | grep -v "HTTP_CODE:"
+            exit 1
+          fi
+
+          echo "✅ Upload command completed with HTTP $HTTP_CODE!"
           echo ""
 
           # Verify upload
           echo "Verifying image status..."
           sleep 5
-          openstack image show "$IMAGE_ID"
 
-          IMAGE_STATUS=$(openstack image show "$IMAGE_ID" -f value -c status)
-          echo ""
+          IMAGE_STATUS=$(curl -s -H "X-Auth-Token: $AUTH_TOKEN" \
+            "${GLANCE_ENDPOINT}/v2/images/${IMAGE_ID}" | jq -r '.status')
+
           echo "Image status: $IMAGE_STATUS"
 
           if [ "$IMAGE_STATUS" = "active" ]; then
             echo ""
             echo "🎉 SUCCESS! Stemcell uploaded to Glance!"
             echo ""
-            echo "The 415 error is fixed with explicit Content-Type!"
+            echo "All fixes worked together:"
+            echo "  ✅ Apache config (LimitRequestBody 0, ProxyTimeout 3600)"
+            echo "  ✅ Glance config (require_image_format_match = False)"
+            echo "  ✅ Direct API with Content-Type: application/octet-stream"
           else
             echo ""
             echo "⚠️ Image status is not 'active': $IMAGE_STATUS"
@@ -383,7 +411,8 @@ jobs:
             # Wait up to 5 minutes for upload to complete
             for i in {1..60}; do
               sleep 5
-              STATUS=$(openstack image show "$IMAGE_ID" -f value -c status)
+              STATUS=$(curl -s -H "X-Auth-Token: $AUTH_TOKEN" \
+                "${GLANCE_ENDPOINT}/v2/images/${IMAGE_ID}" | jq -r '.status')
               echo "Attempt $i/60: Image status = $STATUS"
 
               if [ "$STATUS" = "active" ]; then
@@ -391,7 +420,8 @@ jobs:
                 break
               elif [ "$STATUS" = "error" ]; then
                 echo "❌ Image went to error state!"
-                openstack image show "$IMAGE_ID"
+                curl -s -H "X-Auth-Token: $AUTH_TOKEN" \
+                  "${GLANCE_ENDPOINT}/v2/images/${IMAGE_ID}"
                 exit 1
               fi
             done
