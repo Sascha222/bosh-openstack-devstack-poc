@@ -349,8 +349,17 @@ jobs:
           echo "Getting auth token..."
           AUTH_TOKEN=$(openstack token issue -f value -c id)
 
-          echo "Glance endpoint: $GLANCE_ENDPOINT"
+          echo "Glance endpoint (Apache): $GLANCE_ENDPOINT"
           echo "Auth token (first 20 chars): ${AUTH_TOKEN:0:20}..."
+          echo ""
+
+          # CRITICAL WORKAROUND: Apache is blocking application/octet-stream
+          # Bypass Apache and connect directly to Glance on port 9292!
+          GLANCE_DIRECT="http://127.0.0.1:9292"
+
+          echo "⚠️ WORKAROUND: Bypassing Apache proxy!"
+          echo "   Apache rejects application/octet-stream Content-Type"
+          echo "   Using direct Glance connection: $GLANCE_DIRECT"
           echo ""
 
           # Validate endpoint
@@ -363,11 +372,13 @@ jobs:
 
           # Step 1: Create empty image in Glance via API (metadata only, NO upload yet!)
           echo "Step 1: Creating image metadata via Glance API..."
+          echo "Using direct connection (bypassing Apache): $GLANCE_DIRECT"
+          echo ""
 
           IMAGE_CREATE_RESPONSE=$(curl -s -X POST \
             -H "X-Auth-Token: $AUTH_TOKEN" \
             -H "Content-Type: application/json" \
-            "${GLANCE_ENDPOINT}/v2/images" \
+            "${GLANCE_DIRECT}/v2/images" \
             -d '{
               "name": "bosh-stemcell-'"${STEMCELL_VERSION}"'-test",
               "disk_format": "qcow2",
@@ -392,13 +403,14 @@ jobs:
           echo "Step 2: Uploading image binary data with Python..."
           echo "⏳ This will take several minutes for a ~1.3GB stemcell..."
           echo ""
-          echo "Upload URL: ${GLANCE_ENDPOINT}/v2/images/${IMAGE_ID}/file"
+          echo "Upload URL: ${GLANCE_DIRECT}/v2/images/${IMAGE_ID}/file (direct, bypassing Apache)"
           echo "File size: ${IMAGE_SIZE_MB}MB"
           echo ""
 
-          # Use Python script for chunked streaming upload (avoids curl OOM)
+          # Use Python script for chunked streaming upload
+          # Pass GLANCE_DIRECT instead of GLANCE_ENDPOINT to bypass Apache!
           python3 "${GITHUB_WORKSPACE}/.github/workflows/upload_stemcell.py" \
-            "$GLANCE_ENDPOINT" \
+            "$GLANCE_DIRECT" \
             "$AUTH_TOKEN" \
             "$IMAGE_ID" \
             "image"
@@ -413,7 +425,7 @@ jobs:
             echo ""
             echo "Fetching image state from Glance..."
             ERROR_RESPONSE=$(curl -s -H "X-Auth-Token: $AUTH_TOKEN" \
-              "${GLANCE_ENDPOINT}/v2/images/${IMAGE_ID}")
+              "${GLANCE_DIRECT}/v2/images/${IMAGE_ID}")
             echo "$ERROR_RESPONSE" | jq '.' || echo "$ERROR_RESPONSE"
 
             exit 1
@@ -428,7 +440,7 @@ jobs:
           sleep 5
 
           IMAGE_STATUS=$(curl -s -H "X-Auth-Token: $AUTH_TOKEN" \
-            "${GLANCE_ENDPOINT}/v2/images/${IMAGE_ID}" | jq -r '.status')
+            "${GLANCE_DIRECT}/v2/images/${IMAGE_ID}" | jq -r '.status')
 
           echo "Image status: $IMAGE_STATUS"
 
@@ -436,10 +448,13 @@ jobs:
             echo ""
             echo "🎉 SUCCESS! Stemcell uploaded to Glance!"
             echo ""
-            echo "All fixes worked together:"
-            echo "  ✅ Apache config (LimitRequestBody 0, ProxyTimeout 3600)"
+            echo "Key achievement:"
+            echo "  ✅ Bypassed Apache (direct Glance connection on port 9292)"
+            echo "  ✅ Python chunked upload (no memory issues)"
             echo "  ✅ Glance config (require_image_format_match = False)"
-            echo "  ✅ Direct API with Content-Type: application/octet-stream"
+            echo ""
+            echo "NOTE: Apache Content-Type filtering is a known DevStack limitation."
+            echo "Production deployments should configure Apache properly or use direct Glance access."
           else
             echo ""
             echo "⚠️ Image status is not 'active': $IMAGE_STATUS"
@@ -449,7 +464,7 @@ jobs:
             for i in {1..60}; do
               sleep 5
               STATUS=$(curl -s -H "X-Auth-Token: $AUTH_TOKEN" \
-                "${GLANCE_ENDPOINT}/v2/images/${IMAGE_ID}" | jq -r '.status')
+                "${GLANCE_DIRECT}/v2/images/${IMAGE_ID}" | jq -r '.status')
               echo "Attempt $i/60: Image status = $STATUS"
 
               if [ "$STATUS" = "active" ]; then
@@ -458,7 +473,7 @@ jobs:
               elif [ "$STATUS" = "error" ]; then
                 echo "❌ Image went to error state!"
                 curl -s -H "X-Auth-Token: $AUTH_TOKEN" \
-                  "${GLANCE_ENDPOINT}/v2/images/${IMAGE_ID}"
+                  "${GLANCE_DIRECT}/v2/images/${IMAGE_ID}"
                 exit 1
               fi
             done
