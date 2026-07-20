@@ -370,56 +370,39 @@ jobs:
           echo "✅ Image created with ID: $IMAGE_ID"
           echo ""
 
-          # Step 2: Upload image data using curl with EXPLICIT Content-Type
-          echo "Step 2: Uploading image binary data..."
+          # Step 2: Upload image data using Python (curl runs out of memory)
+          echo "Step 2: Uploading image binary data with Python..."
           echo "⏳ This will take several minutes for a ~1.3GB stemcell..."
           echo ""
           echo "Upload URL: ${GLANCE_ENDPOINT}/v2/images/${IMAGE_ID}/file"
           echo "File size: ${IMAGE_SIZE_MB}MB"
           echo ""
 
-          # CRITICAL: Use stdin piping instead of --data-binary to avoid memory issues
-          # Content-Type MUST be application/octet-stream for binary data
-          echo "Starting upload with curl (streaming from file)..."
+          # Use Python script for chunked streaming upload (avoids curl OOM)
+          python3 "${GITHUB_WORKSPACE}/.github/workflows/upload_stemcell.py" \
+            "$GLANCE_ENDPOINT" \
+            "$AUTH_TOKEN" \
+            "$IMAGE_ID" \
+            "image"
 
-          # Pipe file to curl via stdin to avoid loading entire file into memory
-          HTTP_CODE=$(cat image | curl -s -o /dev/null -w "%{http_code}" -X PUT \
-            -H "X-Auth-Token: $AUTH_TOKEN" \
-            -H "Content-Type: application/octet-stream" \
-            -H "Expect:" \
-            --data-binary @- \
-            --max-time 600 \
-            "${GLANCE_ENDPOINT}/v2/images/${IMAGE_ID}/file")
+          UPLOAD_EXIT_CODE=$?
 
-          echo ""
-          echo "Upload completed!"
-          echo "HTTP Response Code: $HTTP_CODE"
-          echo ""
-
-          if [ "$HTTP_CODE" != "204" ] && [ "$HTTP_CODE" != "200" ]; then
-            echo "❌ Upload failed with HTTP $HTTP_CODE"
+          if [ $UPLOAD_EXIT_CODE -ne 0 ]; then
             echo ""
+            echo "❌ Upload failed! Exit code: $UPLOAD_EXIT_CODE"
 
-            # Try to get error details
-            echo "Fetching error details from Glance..."
+            # Try to get error details from Glance
+            echo ""
+            echo "Fetching image state from Glance..."
             ERROR_RESPONSE=$(curl -s -H "X-Auth-Token: $AUTH_TOKEN" \
               "${GLANCE_ENDPOINT}/v2/images/${IMAGE_ID}")
             echo "$ERROR_RESPONSE" | jq '.' || echo "$ERROR_RESPONSE"
 
-            echo ""
-            echo "Checking common errors..."
-            if [ "$HTTP_CODE" = "413" ]; then
-              echo "❌ 413 Request Entity Too Large - Apache size limit blocking"
-            elif [ "$HTTP_CODE" = "415" ]; then
-              echo "❌ 415 Unsupported Media Type - Content-Type not accepted"
-            elif [ "$HTTP_CODE" = "000" ]; then
-              echo "❌ Connection failed or timeout - curl couldn't complete the request"
-              echo "This might be due to memory limits, network timeout, or proxy issues"
-            fi
             exit 1
           fi
 
-          echo "✅ Upload command completed with HTTP $HTTP_CODE!"
+          echo ""
+          echo "✅ Upload completed successfully!"
           echo ""
 
           # Verify upload
