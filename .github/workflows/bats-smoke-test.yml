@@ -353,20 +353,56 @@ jobs:
           echo "Auth token (first 20 chars): ${AUTH_TOKEN:0:20}..."
           echo ""
 
-          # CRITICAL WORKAROUND: Apache is blocking application/octet-stream
-          # Bypass Apache and connect directly to Glance on port 9292!
-          GLANCE_DIRECT="http://127.0.0.1:9292"
+          # CRITICAL: Find the actual Glance port from DevStack config
+          echo "Finding actual Glance API port..."
 
-          echo "⚠️ WORKAROUND: Bypassing Apache proxy!"
-          echo "   Apache rejects application/octet-stream Content-Type"
-          echo "   Using direct Glance connection: $GLANCE_DIRECT"
+          # Check systemd service to find the real port
+          GLANCE_PORT=$(sudo systemctl show devstack@g-api.service -p ExecStart --no-pager | grep -oP -- '--bind.*?:\K[0-9]+' || echo "")
+
+          if [ -z "$GLANCE_PORT" ]; then
+            # Fallback: check netstat for Glance process
+            GLANCE_PORT=$(sudo netstat -tlnp 2>/dev/null | grep glance | grep LISTEN | awk '{print $4}' | cut -d: -f2 | head -1)
+          fi
+
+          if [ -z "$GLANCE_PORT" ]; then
+            # Fallback: check ss
+            GLANCE_PORT=$(sudo ss -tlnp 2>/dev/null | grep glance | awk '{print $4}' | cut -d: -f2 | head -1)
+          fi
+
+          if [ -z "$GLANCE_PORT" ]; then
+            echo "WARNING: Could not detect Glance port, trying default 9292"
+            GLANCE_PORT="9292"
+          fi
+
+          GLANCE_DIRECT="http://127.0.0.1:${GLANCE_PORT}"
+
+          echo "Detected Glance API port: $GLANCE_PORT"
+          echo "Direct Glance URL: $GLANCE_DIRECT"
           echo ""
 
-          # Validate endpoint
+          # Test if Glance is accessible
+          echo "Testing direct Glance connection..."
+          if curl -s -f -o /dev/null "${GLANCE_DIRECT}/v2/images" -H "X-Auth-Token: $AUTH_TOKEN"; then
+            echo "✅ Direct Glance connection successful!"
+          else
+            echo "❌ Cannot connect to Glance at ${GLANCE_DIRECT}"
+            echo ""
+            echo "Debugging info:"
+            echo "Active Glance processes:"
+            ps aux | grep glance | grep -v grep || echo "No glance processes found"
+            echo ""
+            echo "Listening ports:"
+            sudo netstat -tlnp 2>/dev/null | grep LISTEN | grep -E ":(9292|60)" || sudo ss -tlnp | grep LISTEN | grep -E ":(9292|60)"
+            echo ""
+            echo "DevStack Glance service status:"
+            sudo systemctl status devstack@g-api.service --no-pager || echo "Service not found"
+            exit 1
+          fi
+          echo ""
+
+          # Validate Apache endpoint too
           if [[ ! "$GLANCE_ENDPOINT" =~ ^http ]]; then
             echo "ERROR: Invalid Glance endpoint: $GLANCE_ENDPOINT"
-            echo "Full catalog output:"
-            openstack catalog show glance
             exit 1
           fi
 
