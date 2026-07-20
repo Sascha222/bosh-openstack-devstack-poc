@@ -325,12 +325,23 @@ jobs:
           echo ""
 
           # Get Glance endpoint and auth token
-          GLANCE_ENDPOINT=$(openstack catalog show glance -f value -c endpoints | grep public | awk '{print $2}')
+          echo "Getting Glance endpoint..."
+          GLANCE_ENDPOINT=$(openstack endpoint list --service glance --interface public -f value -c URL)
+
+          echo "Getting auth token..."
           AUTH_TOKEN=$(openstack token issue -f value -c id)
 
           echo "Glance endpoint: $GLANCE_ENDPOINT"
-          echo "Auth token: ${AUTH_TOKEN:0:20}..."
+          echo "Auth token (first 20 chars): ${AUTH_TOKEN:0:20}..."
           echo ""
+
+          # Validate endpoint
+          if [[ ! "$GLANCE_ENDPOINT" =~ ^http ]]; then
+            echo "ERROR: Invalid Glance endpoint: $GLANCE_ENDPOINT"
+            echo "Full catalog output:"
+            openstack catalog show glance
+            exit 1
+          fi
 
           # Step 1: Create empty image in Glance via API (metadata only, NO upload yet!)
           echo "Step 1: Creating image metadata via Glance API..."
