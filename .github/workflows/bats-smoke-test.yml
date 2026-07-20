@@ -375,33 +375,46 @@ jobs:
           echo "⏳ This will take several minutes for a ~1.3GB stemcell..."
           echo ""
           echo "Upload URL: ${GLANCE_ENDPOINT}/v2/images/${IMAGE_ID}/file"
+          echo "File size: ${IMAGE_SIZE_MB}MB"
           echo ""
 
-          # CRITICAL: Content-Type MUST be application/octet-stream for binary data!
-          # Use --fail-with-body to get error details if upload fails
-          HTTP_RESPONSE=$(curl -v --fail-with-body -w "\nHTTP_CODE:%{http_code}" -X PUT \
+          # CRITICAL: Use stdin piping instead of --data-binary to avoid memory issues
+          # Content-Type MUST be application/octet-stream for binary data
+          echo "Starting upload with curl (streaming from file)..."
+
+          # Pipe file to curl via stdin to avoid loading entire file into memory
+          HTTP_CODE=$(cat image | curl -s -o /dev/null -w "%{http_code}" -X PUT \
             -H "X-Auth-Token: $AUTH_TOKEN" \
             -H "Content-Type: application/octet-stream" \
-            --data-binary @image \
-            "${GLANCE_ENDPOINT}/v2/images/${IMAGE_ID}/file" 2>&1)
-
-          HTTP_CODE=$(echo "$HTTP_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+            -H "Expect:" \
+            --data-binary @- \
+            --max-time 600 \
+            "${GLANCE_ENDPOINT}/v2/images/${IMAGE_ID}/file")
 
           echo ""
+          echo "Upload completed!"
           echo "HTTP Response Code: $HTTP_CODE"
           echo ""
 
           if [ "$HTTP_CODE" != "204" ] && [ "$HTTP_CODE" != "200" ]; then
             echo "❌ Upload failed with HTTP $HTTP_CODE"
             echo ""
-            echo "Full Response:"
-            echo "$HTTP_RESPONSE"
+
+            # Try to get error details
+            echo "Fetching error details from Glance..."
+            ERROR_RESPONSE=$(curl -s -H "X-Auth-Token: $AUTH_TOKEN" \
+              "${GLANCE_ENDPOINT}/v2/images/${IMAGE_ID}")
+            echo "$ERROR_RESPONSE" | jq '.' || echo "$ERROR_RESPONSE"
+
             echo ""
-            echo "Checking if it's a 413 (Request Entity Too Large) or 415 (Unsupported Media Type)..."
-            if echo "$HTTP_RESPONSE" | grep -q "413"; then
-              echo "❌ 413 error - Apache size limit still blocking!"
-            elif echo "$HTTP_RESPONSE" | grep -q "415"; then
-              echo "❌ 415 error - Content-Type still not accepted!"
+            echo "Checking common errors..."
+            if [ "$HTTP_CODE" = "413" ]; then
+              echo "❌ 413 Request Entity Too Large - Apache size limit blocking"
+            elif [ "$HTTP_CODE" = "415" ]; then
+              echo "❌ 415 Unsupported Media Type - Content-Type not accepted"
+            elif [ "$HTTP_CODE" = "000" ]; then
+              echo "❌ Connection failed or timeout - curl couldn't complete the request"
+              echo "This might be due to memory limits, network timeout, or proxy issues"
             fi
             exit 1
           fi
