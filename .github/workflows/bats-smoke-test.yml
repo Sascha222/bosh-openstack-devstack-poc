@@ -456,10 +456,16 @@ jobs:
           export OS_USER_DOMAIN_NAME OS_PROJECT_DOMAIN_NAME OS_IDENTITY_API_VERSION
           export PATH=$PATH:$HOME/.local/bin
 
-          # Try Glance CLI upload (handles chunking internally)
-          echo "Uploading with: glance image-upload --file image --progress $IMAGE_ID"
+          # CRITICAL: Force glance CLI to use direct Glance port (bypass Apache!)
+          # Override the Glance endpoint to avoid Apache's Content-Type filtering
+          export OS_IMAGE_API_VERSION=2
+          export GLANCE_URL="${GLANCE_DIRECT}"
 
-          if glance image-upload --file image --progress "$IMAGE_ID"; then
+          # Try Glance CLI upload (handles chunking internally)
+          echo "Uploading with: glance --os-image-url ${GLANCE_URL} image-upload --file image --progress $IMAGE_ID"
+          echo ""
+
+          if glance --os-image-url "${GLANCE_URL}" image-upload --file image --progress "$IMAGE_ID"; then
             echo ""
             echo "✅ Glance CLI upload successful!"
             UPLOAD_EXIT_CODE=0
