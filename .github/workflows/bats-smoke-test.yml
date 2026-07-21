@@ -477,6 +477,12 @@ jobs:
             sudo chmod 644 "${GLANCE_STORE_PATH}/${IMAGE_ID}"
           fi
 
+          # Verify file exists
+          if [ ! -f "${GLANCE_STORE_PATH}/${IMAGE_ID}" ]; then
+            echo "❌ File not found at ${GLANCE_STORE_PATH}/${IMAGE_ID}"
+            exit 1
+          fi
+
           echo "✅ File copied to Glance store"
           echo ""
 
@@ -524,7 +530,12 @@ jobs:
 
           echo "Using MySQL command: $MYSQL_CMD"
 
-          # Update via MySQL - set status to 'active' and update size/checksum
+          # Update via MySQL - set status, size, checksum AND location
+          # The location tells Glance where to find the actual file
+          FILE_LOCATION="file://${GLANCE_STORE_PATH}/${IMAGE_ID}"
+
+          echo "Setting image location: $FILE_LOCATION"
+
           $MYSQL_CMD glance -e "
             UPDATE images
             SET status='active',
@@ -532,6 +543,20 @@ jobs:
                 checksum='${IMAGE_CHECKSUM}',
                 virtual_size=${IMAGE_SIZE_ACTUAL}
             WHERE id='${IMAGE_ID}';
+
+            INSERT INTO image_locations (image_id, value, meta_data, status, created_at, updated_at)
+            VALUES (
+              '${IMAGE_ID}',
+              '{\"url\": \"${FILE_LOCATION}\", \"metadata\": {}}',
+              '{}',
+              'active',
+              NOW(),
+              NOW()
+            )
+            ON DUPLICATE KEY UPDATE
+              value = '{\"url\": \"${FILE_LOCATION}\", \"metadata\": {}}',
+              status = 'active',
+              updated_at = NOW();
           "
 
           if [ $? -eq 0 ]; then
