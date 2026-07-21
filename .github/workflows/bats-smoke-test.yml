@@ -256,9 +256,24 @@ jobs:
           # Get latest Ubuntu Jammy stemcell from bosh.io API
           echo "Fetching latest stemcell info from bosh.io..."
           STEMCELL_INFO=$(curl -s https://bosh.io/api/v1/stemcells/bosh-openstack-kvm-ubuntu-jammy-go_agent)
-          STEMCELL_URL=$(echo "$STEMCELL_INFO" | jq -r '.[0].regular.url')
-          STEMCELL_VERSION=$(echo "$STEMCELL_INFO" | jq -r '.[0].version')
-          STEMCELL_SIZE=$(echo "$STEMCELL_INFO" | jq -r '.[0].regular.size')
+
+          # Debug: show raw response
+          echo "API Response (first 200 chars): ${STEMCELL_INFO:0:200}"
+
+          # Check if response is valid JSON array
+          if ! echo "$STEMCELL_INFO" | jq -e '. | type == "array"' > /dev/null 2>&1; then
+            echo "ERROR: Invalid response from bosh.io API"
+            echo "Full response: $STEMCELL_INFO"
+            echo ""
+            echo "Falling back to hardcoded stemcell URL..."
+            STEMCELL_URL="https://bosh.io/d/stemcells/bosh-openstack-kvm-ubuntu-jammy-go_agent?v=1.1298"
+            STEMCELL_VERSION="1.1298"
+            STEMCELL_SIZE="1352914878"
+          else
+            STEMCELL_URL=$(echo "$STEMCELL_INFO" | jq -r '.[0].regular.url')
+            STEMCELL_VERSION=$(echo "$STEMCELL_INFO" | jq -r '.[0].version')
+            STEMCELL_SIZE=$(echo "$STEMCELL_INFO" | jq -r '.[0].regular.size')
+          fi
 
           echo "Found stemcell:"
           echo "  Version: $STEMCELL_VERSION"
