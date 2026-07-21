@@ -466,7 +466,16 @@ jobs:
           # Copy image directly to Glance's store with the image ID as filename
           echo "Copying image to Glance store..."
           sudo cp image "${GLANCE_STORE_PATH}/${IMAGE_ID}"
-          sudo chown glance:glance "${GLANCE_STORE_PATH}/${IMAGE_ID}" 2>/dev/null || sudo chown stack:stack "${GLANCE_STORE_PATH}/${IMAGE_ID}"
+
+          # Try to set correct ownership (glance user in production, stack in DevStack)
+          if id glance &>/dev/null; then
+            sudo chown glance:glance "${GLANCE_STORE_PATH}/${IMAGE_ID}"
+          elif id stack &>/dev/null; then
+            sudo chown stack:stack "${GLANCE_STORE_PATH}/${IMAGE_ID}"
+          else
+            # Fallback: just make it readable
+            sudo chmod 644 "${GLANCE_STORE_PATH}/${IMAGE_ID}"
+          fi
 
           echo "✅ File copied to Glance store"
           echo ""
