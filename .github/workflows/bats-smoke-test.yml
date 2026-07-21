@@ -164,6 +164,16 @@ jobs:
               echo "max_request_body_size = 0" | sudo tee -a "$GLANCE_CONF" > /dev/null
             fi
 
+            # CRITICAL FIX: Increase socket timeout for large uploads
+            # Eventlet/Glance defaults to 60s which is too short for 1.3GB
+            if ! grep -q "client_socket_timeout" "$GLANCE_CONF"; then
+              echo "" | sudo tee -a "$GLANCE_CONF" > /dev/null
+              echo "[DEFAULT]" | sudo tee -a "$GLANCE_CONF" > /dev/null
+              echo "client_socket_timeout = 3600" | sudo tee -a "$GLANCE_CONF" > /dev/null
+              echo "send_timeout = 3600" | sudo tee -a "$GLANCE_CONF" > /dev/null
+              echo "workers = 1" | sudo tee -a "$GLANCE_CONF" > /dev/null
+            fi
+
             # CRITICAL FIX for 415 error: Disable strict image format matching
             # BOSH stemcells may not match qcow2 format exactly, causing 415 errors
             # See: https://docs.openstack.org/glance/2025.1/configuration/glance_api.html#image_format.require_image_format_match
