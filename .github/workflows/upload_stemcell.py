@@ -13,16 +13,16 @@ def upload_stemcell(glance_endpoint, auth_token, image_id, image_path):
 
     url = f"{glance_endpoint}/v2/images/{image_id}/file"
 
-    # CRITICAL: Try WITHOUT Content-Type header first!
-    # Some Apache/Glance configs reject explicit Content-Type
-    # Glance should auto-detect binary data
-    headers = {
-        'X-Auth-Token': auth_token,
-        # Do NOT set Content-Type - let Glance/Apache auto-detect!
-    }
-
     file_size = os.path.getsize(image_path)
     file_size_mb = file_size / (1024 * 1024)
+
+    # CRITICAL: Glance REQUIRES Content-Length for large uploads!
+    # Without it, chunked transfer causes "Connection reset by peer"
+    headers = {
+        'X-Auth-Token': auth_token,
+        'Content-Length': str(file_size),  # MUST be set!
+        # No Content-Type - let Glance auto-detect
+    }
 
     print(f"Uploading {image_path}")
     print(f"File size: {file_size_mb:.2f} MB")
@@ -32,16 +32,15 @@ def upload_stemcell(glance_endpoint, auth_token, image_id, image_path):
 
     # Open file in binary read mode with streaming
     with open(image_path, 'rb') as f:
-        # Stream upload with chunked transfer encoding
-        # This reads and sends file in chunks, never loading entire file into memory
-        print("Starting chunked upload (no explicit Content-Type)...")
+        # Stream upload WITH Content-Length (no chunked encoding)
+        print("Starting upload with Content-Length header...")
 
         try:
             response = requests.put(
                 url,
                 headers=headers,
                 data=f,  # Stream from file handle
-                timeout=600  # 10 minute timeout
+                timeout=1800  # 30 minute timeout for 1.3GB
             )
 
             print(f"\nHTTP Response Code: {response.status_code}")
