@@ -4,8 +4,6 @@ on:
   workflow_dispatch:
   push:
     branches: [ main, master ]
-    paths:
-      - '.github/workflows/bats-smoke-test.yml'
 
 jobs:
   bats-smoke-test:
