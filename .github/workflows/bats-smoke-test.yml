@@ -266,7 +266,8 @@ jobs:
             echo "Full response: $STEMCELL_INFO"
             echo ""
             echo "Falling back to hardcoded stemcell URL..."
-            STEMCELL_URL="https://bosh.io/d/stemcells/bosh-openstack-kvm-ubuntu-jammy-go_agent?v=1.1298"
+            # Use a known working direct download URL from GitHub releases
+            STEMCELL_URL="https://storage.googleapis.com/bosh-core-stemcells/1.1298/bosh-stemcell-1.1298-openstack-kvm-ubuntu-jammy-go_agent.tgz"
             STEMCELL_VERSION="1.1298"
             STEMCELL_SIZE="1352914878"
           else
