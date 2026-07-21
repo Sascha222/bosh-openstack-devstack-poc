@@ -544,12 +544,13 @@ jobs:
                 virtual_size=${IMAGE_SIZE_ACTUAL}
             WHERE id='${IMAGE_ID}';
 
-            INSERT INTO image_locations (image_id, value, meta_data, status, created_at, updated_at)
+            INSERT INTO image_locations (image_id, value, meta_data, status, deleted, created_at, updated_at)
             VALUES (
               '${IMAGE_ID}',
               '{\"url\": \"${FILE_LOCATION}\", \"metadata\": {}}',
               '{}',
               'active',
+              0,
               NOW(),
               NOW()
             )
