@@ -30,16 +30,21 @@ def upload_stemcell(glance_endpoint, auth_token, image_id, image_path):
     print(f"Headers: {headers}")
     print("")
 
-    # Open file in binary read mode with streaming
+    # Open file in binary read mode
     with open(image_path, 'rb') as f:
-        # Stream upload WITH Content-Length (no chunked encoding)
-        print("Starting upload with Content-Length header...")
+        # Read entire file into memory (GitHub Actions has enough RAM)
+        print("Reading file into memory...")
+        file_data = f.read()
+        print(f"File loaded: {len(file_data)} bytes")
+
+        # Upload with Content-Length (no streaming, no chunking)
+        print("Starting direct upload with Content-Length header...")
 
         try:
             response = requests.put(
                 url,
                 headers=headers,
-                data=f,  # Stream from file handle
+                data=file_data,  # Send entire file at once
                 timeout=1800  # 30 minute timeout for 1.3GB
             )
 
