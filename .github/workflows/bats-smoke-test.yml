@@ -480,26 +480,52 @@ jobs:
           echo "✅ File copied to Glance store"
           echo ""
 
-          # Update image status to 'active' via API
-          echo "Updating image status to 'active'..."
-
-          curl -s -X PATCH \
-            -H "X-Auth-Token: $AUTH_TOKEN" \
-            -H "Content-Type: application/openstack-images-v2.1-json-patch" \
-            "${GLANCE_DIRECT}/v2/images/${IMAGE_ID}" \
-            -d '[{"op": "replace", "path": "/status", "value": "active"}]' || true
-
-          # Alternative: use glance API to set size and checksum
+          # Calculate checksum and size
           IMAGE_SIZE_ACTUAL=$(stat -c%s "${GLANCE_STORE_PATH}/${IMAGE_ID}")
           IMAGE_CHECKSUM=$(md5sum "${GLANCE_STORE_PATH}/${IMAGE_ID}" | cut -d' ' -f1)
 
           echo "Image size: $IMAGE_SIZE_ACTUAL bytes"
           echo "Image checksum: $IMAGE_CHECKSUM"
-
-          # Force update via database (DevStack only!)
           echo ""
+
+          # CRITICAL: Update metadata first (size, checksum, virtual_size)
+          echo "Setting image metadata (size, checksum)..."
+          curl -s -X PATCH \
+            -H "X-Auth-Token: $AUTH_TOKEN" \
+            -H "Content-Type: application/openstack-images-v2.1-json-patch" \
+            "${GLANCE_DIRECT}/v2/images/${IMAGE_ID}" \
+            -d "[
+              {\"op\": \"replace\", \"path\": \"/size\", \"value\": ${IMAGE_SIZE_ACTUAL}},
+              {\"op\": \"replace\", \"path\": \"/checksum\", \"value\": \"${IMAGE_CHECKSUM}\"},
+              {\"op\": \"replace\", \"path\": \"/virtual_size\", \"value\": ${IMAGE_SIZE_ACTUAL}}
+            ]"
+
+          echo ""
+          echo "✅ Metadata updated"
+          echo ""
+
+          # Force update via database to activate (status is read-only via API)
           echo "Forcing image activation via database update..."
-          sudo mysql -e "USE glance; UPDATE images SET status='active', size=${IMAGE_SIZE_ACTUAL}, checksum='${IMAGE_CHECKSUM}' WHERE id='${IMAGE_ID}';" 2>/dev/null || true
+
+          # Update via MySQL - set status to 'active' and update size/checksum
+          sudo mysql glance -e "
+            UPDATE images
+            SET status='active',
+                size=${IMAGE_SIZE_ACTUAL},
+                checksum='${IMAGE_CHECKSUM}',
+                virtual_size=${IMAGE_SIZE_ACTUAL}
+            WHERE id='${IMAGE_ID}';
+          "
+
+          if [ $? -eq 0 ]; then
+            echo "✅ Database updated successfully"
+          else
+            echo "❌ Database update failed"
+            exit 1
+          fi
+
+          # Give Glance a moment to sync
+          sleep 3
 
           UPLOAD_EXIT_CODE=0
 
