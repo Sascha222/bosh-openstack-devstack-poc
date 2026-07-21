@@ -443,11 +443,11 @@ jobs:
           echo "✅ Image created with ID: $IMAGE_ID"
           echo ""
 
-          # Step 2: Upload image data using OpenStack CLI (bypass API issues)
+          # Step 2: Upload image data using Glance CLI (bypass API issues)
           echo "Step 2: Uploading image binary data..."
           echo "⏳ This will take several minutes for a ~1.3GB stemcell..."
           echo ""
-          echo "Using OpenStack CLI with direct file upload"
+          echo "Using Glance CLI with direct file upload"
           echo "File size: ${IMAGE_SIZE_MB}MB"
           echo ""
 
@@ -456,12 +456,16 @@ jobs:
           export OS_USER_DOMAIN_NAME OS_PROJECT_DOMAIN_NAME OS_IDENTITY_API_VERSION
           export PATH=$PATH:$HOME/.local/bin
 
-          # Try OpenStack CLI upload (handles chunking internally)
-          echo "Uploading with: openstack image set --file image $IMAGE_ID"
+          # Try Glance CLI upload (handles chunking internally)
+          echo "Uploading with: glance image-upload --file image --progress $IMAGE_ID"
 
-          if ! openstack image set --file image "$IMAGE_ID"; then
+          if glance image-upload --file image --progress "$IMAGE_ID"; then
             echo ""
-            echo "❌ OpenStack CLI upload failed!"
+            echo "✅ Glance CLI upload successful!"
+            UPLOAD_EXIT_CODE=0
+          else
+            echo ""
+            echo "❌ Glance CLI upload failed!"
             echo ""
             echo "Falling back to Python upload..."
 
@@ -473,9 +477,6 @@ jobs:
               "image"
 
             UPLOAD_EXIT_CODE=$?
-          else
-            echo "✅ OpenStack CLI upload successful!"
-            UPLOAD_EXIT_CODE=0
           fi
 
           if [ $UPLOAD_EXIT_CODE -ne 0 ]; then
