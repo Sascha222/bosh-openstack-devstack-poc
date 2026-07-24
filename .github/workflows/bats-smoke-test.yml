@@ -226,15 +226,20 @@ jobs:
 
           # Show current config
           echo "=== BEFORE ==="
-          sudo grep -A 2 "\[glance\]" "$NOVA_CONF" || echo "No [glance] section found"
+          sudo grep -A 5 "\[glance\]" "$NOVA_CONF" || echo "No [glance] section found"
           echo ""
 
           # Configure Nova to use direct Glance endpoint (bypass Apache)
+          # CRITICAL: Set both api_servers AND disable endpoint_override from catalog
           sudo crudini --set "$NOVA_CONF" glance api_servers "http://127.0.0.1:${GLANCE_PORT}"
+          sudo crudini --set "$NOVA_CONF" glance endpoint_override "http://127.0.0.1:${GLANCE_PORT}"
+
+          # Also ensure we're not using the service catalog for glance
+          sudo crudini --set "$NOVA_CONF" glance valid_interfaces "internal,public"
 
           # Verify
           echo "=== AFTER ==="
-          sudo crudini --get "$NOVA_CONF" glance api_servers
+          sudo grep -A 5 "\[glance\]" "$NOVA_CONF"
           echo ""
 
           # Restart Nova services (only those that exist)
