@@ -242,6 +242,31 @@ jobs:
           sudo grep -A 5 "\[glance\]" "$NOVA_CONF"
           echo ""
 
+          # CRITICAL: Verify Glance is actually running on the port BEFORE restarting Nova
+          echo "=== Verifying Glance is accessible on port ${GLANCE_PORT} ==="
+          if ! curl -s -f -o /dev/null "http://127.0.0.1:${GLANCE_PORT}/"; then
+            echo "❌ Glance is NOT accessible on port ${GLANCE_PORT}"
+            echo ""
+            echo "Checking Glance service status..."
+            sudo systemctl status devstack@g-api.service --no-pager || true
+            echo ""
+            echo "Checking what's listening on ports..."
+            sudo ss -tlnp | grep -E ":(9292|60)" || true
+            echo ""
+            echo "Attempting to restart Glance..."
+            sudo systemctl restart devstack@g-api.service
+            sleep 5
+
+            if ! curl -s -f -o /dev/null "http://127.0.0.1:${GLANCE_PORT}/"; then
+              echo "❌ Glance STILL not accessible after restart!"
+              echo "Checking Glance logs..."
+              sudo journalctl -u devstack@g-api.service --no-pager -n 50
+              exit 1
+            fi
+          fi
+          echo "✅ Glance is accessible on port ${GLANCE_PORT}"
+          echo ""
+
           # Restart Nova services (only those that exist)
           echo "Restarting Nova services..."
           for service in n-api n-cpu n-cond n-sch; do
