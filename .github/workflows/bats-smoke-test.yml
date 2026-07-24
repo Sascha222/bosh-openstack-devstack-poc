@@ -237,22 +237,33 @@ jobs:
           sudo crudini --get "$NOVA_CONF" glance api_servers
           echo ""
 
-          # Restart Nova services
+          # Restart Nova services (only those that exist)
           echo "Restarting Nova services..."
-          sudo systemctl restart devstack@n-api.service
-          sudo systemctl restart devstack@n-cpu.service
-          sudo systemctl restart devstack@n-cond.service
-          sudo systemctl restart devstack@n-sch.service
+          for service in n-api n-cpu n-cond n-sch; do
+            if sudo systemctl list-units --full --all | grep -q "devstack@${service}.service"; then
+              echo "Restarting devstack@${service}.service..."
+              sudo systemctl restart "devstack@${service}.service" || echo "Warning: Failed to restart ${service}"
+            else
+              echo "Skipping devstack@${service}.service (not found)"
+            fi
+          done
 
           sleep 10
 
           # Verify services are running
           echo ""
           echo "=== Nova Service Status ==="
-          sudo systemctl is-active devstack@n-api.service && echo "✓ n-api" || echo "✗ n-api"
-          sudo systemctl is-active devstack@n-cpu.service && echo "✓ n-cpu" || echo "✗ n-cpu"
-          sudo systemctl is-active devstack@n-cond.service && echo "✓ n-cond" || echo "✗ n-cond"
-          sudo systemctl is-active devstack@n-sch.service && echo "✓ n-sch" || echo "✗ n-sch"
+          for service in n-api n-cpu n-cond n-sch; do
+            if sudo systemctl list-units --full --all | grep -q "devstack@${service}.service"; then
+              if sudo systemctl is-active --quiet "devstack@${service}.service"; then
+                echo "✓ ${service}"
+              else
+                echo "✗ ${service}"
+              fi
+            else
+              echo "- ${service} (not installed)"
+            fi
+          done
 
           echo ""
           echo "✅ Nova configured for direct Glance access (bypassing Apache proxy)"
