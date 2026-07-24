@@ -769,11 +769,43 @@ jobs:
 
           # Create VM from stemcell
           echo "Creating VM from stemcell..."
-          openstack server create \
+
+          # Try to create VM and capture exit code
+          set +e
+          VM_CREATE_OUTPUT=$(openstack server create \
             --flavor m1.small \
             --image "$IMAGE_ID" \
             --network "$NETWORK_ID" \
-            bosh-stemcell-test-vm
+            bosh-stemcell-test-vm 2>&1)
+          VM_CREATE_EXIT=$?
+          set -e
+
+          echo "$VM_CREATE_OUTPUT"
+
+          if [ $VM_CREATE_EXIT -ne 0 ]; then
+            echo ""
+            echo "❌ VM creation command failed with exit code: $VM_CREATE_EXIT"
+            echo ""
+
+            echo "=== Nova Compute Logs (last 100 lines) ==="
+            sudo journalctl -u devstack@n-cpu.service --no-pager -n 100 | grep -A 5 -B 5 "ERROR\|GlanceConnectionFailed\|502\|Proxy Error" || sudo journalctl -u devstack@n-cpu.service --no-pager -n 100
+
+            echo ""
+            echo "=== Nova API Logs (last 50 lines) ==="
+            sudo journalctl -u devstack@n-api.service --no-pager -n 50 | grep -A 5 -B 5 "ERROR\|GlanceConnectionFailed" || sudo journalctl -u devstack@n-api.service --no-pager -n 50
+
+            echo ""
+            echo "=== Current Nova Glance Config ==="
+            sudo grep -A 10 "\[glance\]" /etc/nova/nova.conf
+
+            echo ""
+            echo "=== Test direct Glance connection ==="
+            GLANCE_PORT=$(sudo grep -oP 'bind_port = \K[0-9]+' /etc/glance/glance-api.conf 2>/dev/null | head -1 || echo "9292")
+            echo "Testing http://127.0.0.1:${GLANCE_PORT}/v2/images/${IMAGE_ID}..."
+            curl -s -I -H "X-Auth-Token: $(openstack token issue -f value -c id)" "http://127.0.0.1:${GLANCE_PORT}/v2/images/${IMAGE_ID}" || echo "Direct connection FAILED"
+
+            exit 1
+          fi
 
           echo ""
           echo "Waiting for VM to become ACTIVE..."
