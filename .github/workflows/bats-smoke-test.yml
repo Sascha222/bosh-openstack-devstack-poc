@@ -273,6 +273,34 @@ jobs:
           echo ""
           echo "✅ Nova configured for direct Glance access (bypassing Apache proxy)"
 
+      - name: Verify Nova Glance configuration
+        run: |
+          echo "=========================================="
+          echo "  Verify Nova → Glance Configuration"
+          echo "=========================================="
+
+          NOVA_CONF="/etc/nova/nova.conf"
+
+          echo "=== Current Nova Glance Config ==="
+          sudo grep -A 10 "\[glance\]" "$NOVA_CONF" || echo "No [glance] section found"
+          echo ""
+
+          echo "=== Testing Glance connectivity from localhost ==="
+          GLANCE_PORT=$(sudo grep -oP 'bind_port = \K[0-9]+' /etc/glance/glance-api.conf 2>/dev/null | head -1)
+          if [ -z "$GLANCE_PORT" ]; then
+            GLANCE_PORT="9292"
+          fi
+
+          echo "Glance port: $GLANCE_PORT"
+          echo "Testing http://127.0.0.1:${GLANCE_PORT}/..."
+
+          curl -s -I "http://127.0.0.1:${GLANCE_PORT}/" || echo "Direct connection failed"
+          echo ""
+
+          echo "=== Nova Compute Service Logs (last 30 lines) ==="
+          sudo journalctl -u devstack@n-cpu.service --no-pager -n 30 || true
+          echo ""
+
       - name: Verify Apache and Glance are running
         run: |
           echo "=== Service Status ==="
@@ -765,8 +793,27 @@ jobs:
               openstack server show bosh-stemcell-test-vm
 
               echo ""
-              echo "Checking nova-compute logs..."
-              sudo journalctl -u devstack@n-cpu.service --no-pager -n 50 || true
+              echo "=== Nova Compute Logs (last 100 lines) ==="
+              sudo journalctl -u devstack@n-cpu.service --no-pager -n 100 | grep -A 5 -B 5 "ERROR\|GlanceConnectionFailed\|502\|Proxy Error" || sudo journalctl -u devstack@n-cpu.service --no-pager -n 100
+
+              echo ""
+              echo "=== Nova API Logs (last 50 lines) ==="
+              sudo journalctl -u devstack@n-api.service --no-pager -n 50 | grep -A 5 -B 5 "ERROR\|GlanceConnectionFailed" || sudo journalctl -u devstack@n-api.service --no-pager -n 50
+
+              echo ""
+              echo "=== Nova Conductor Logs (last 50 lines) ==="
+              sudo journalctl -u devstack@n-cond.service --no-pager -n 50 2>/dev/null | grep -A 5 -B 5 "ERROR\|GlanceConnectionFailed" || true
+
+              echo ""
+              echo "=== Current Nova Glance Config ==="
+              sudo grep -A 10 "\[glance\]" /etc/nova/nova.conf
+
+              echo ""
+              echo "=== Test direct Glance connection from Nova host ==="
+              GLANCE_PORT=$(sudo grep -oP 'bind_port = \K[0-9]+' /etc/glance/glance-api.conf 2>/dev/null | head -1 || echo "9292")
+              echo "Testing http://127.0.0.1:${GLANCE_PORT}/v2/images..."
+              curl -s -I -H "X-Auth-Token: $(openstack token issue -f value -c id)" "http://127.0.0.1:${GLANCE_PORT}/v2/images" || echo "Direct connection FAILED"
+
               exit 1
             fi
 
