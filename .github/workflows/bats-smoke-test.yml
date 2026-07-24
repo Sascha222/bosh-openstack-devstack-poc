@@ -202,6 +202,61 @@ jobs:
             echo "WARNING: Glance config not found at $GLANCE_CONF"
           fi
 
+      - name: Configure Nova to use direct Glance endpoint (bypass Apache)
+        run: |
+          echo "=========================================="
+          echo "  FIX: Nova direct Glance endpoint"
+          echo "=========================================="
+
+          GLANCE_CONF="/etc/glance/glance-api.conf"
+          NOVA_CONF="/etc/nova/nova.conf"
+
+          # Get Glance port
+          GLANCE_PORT=$(sudo grep -oP 'bind_port = \K[0-9]+' "$GLANCE_CONF" 2>/dev/null | head -1)
+          if [ -z "$GLANCE_PORT" ]; then
+            GLANCE_PORT="9292"
+          fi
+
+          echo "Glance API Port: $GLANCE_PORT"
+          echo "Configuring Nova to use http://127.0.0.1:${GLANCE_PORT}"
+          echo ""
+
+          # Install crudini if not available
+          sudo apt-get install -y crudini
+
+          # Show current config
+          echo "=== BEFORE ==="
+          sudo grep -A 2 "\[glance\]" "$NOVA_CONF" || echo "No [glance] section found"
+          echo ""
+
+          # Configure Nova to use direct Glance endpoint (bypass Apache)
+          sudo crudini --set "$NOVA_CONF" glance api_servers "http://127.0.0.1:${GLANCE_PORT}"
+
+          # Verify
+          echo "=== AFTER ==="
+          sudo crudini --get "$NOVA_CONF" glance api_servers
+          echo ""
+
+          # Restart Nova services
+          echo "Restarting Nova services..."
+          sudo systemctl restart devstack@n-api.service
+          sudo systemctl restart devstack@n-cpu.service
+          sudo systemctl restart devstack@n-cond.service
+          sudo systemctl restart devstack@n-sch.service
+
+          sleep 10
+
+          # Verify services are running
+          echo ""
+          echo "=== Nova Service Status ==="
+          sudo systemctl is-active devstack@n-api.service && echo "✓ n-api" || echo "✗ n-api"
+          sudo systemctl is-active devstack@n-cpu.service && echo "✓ n-cpu" || echo "✗ n-cpu"
+          sudo systemctl is-active devstack@n-cond.service && echo "✓ n-cond" || echo "✗ n-cond"
+          sudo systemctl is-active devstack@n-sch.service && echo "✓ n-sch" || echo "✗ n-sch"
+
+          echo ""
+          echo "✅ Nova configured for direct Glance access (bypassing Apache proxy)"
+
       - name: Verify Apache and Glance are running
         run: |
           echo "=== Service Status ==="
