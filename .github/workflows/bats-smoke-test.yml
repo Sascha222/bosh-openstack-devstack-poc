@@ -214,7 +214,13 @@ jobs:
 
           # CRITICAL: Get ACTUAL port Glance is listening on, not what's in config
           echo "=== Finding actual Glance port ==="
-          GLANCE_PORT=$(sudo ss -tlnp | grep glance | awk '{print $4}' | cut -d: -f2 | head -1)
+
+          # Get all listening ports with glance/uwsgi
+          sudo ss -tlnp | grep -E "glance|uwsgi" > /tmp/glance_ports.txt || true
+          cat /tmp/glance_ports.txt
+
+          # Extract port from "127.0.0.1:PORT" pattern
+          GLANCE_PORT=$(grep -oP '127\.0\.0\.1:\K[0-9]+' /tmp/glance_ports.txt | head -1)
 
           if [ -z "$GLANCE_PORT" ]; then
             echo "WARNING: Could not detect Glance port from listening sockets"
@@ -224,6 +230,7 @@ jobs:
 
           if [ -z "$GLANCE_PORT" ]; then
             echo "ERROR: Could not find Glance port!"
+            echo "Full socket output:"
             sudo ss -tlnp | grep -E ":(9292|60)"
             exit 1
           fi
