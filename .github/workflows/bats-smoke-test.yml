@@ -59,6 +59,8 @@ jobs:
             ENABLED_SERVICES+=,g-api,g-reg
             ENABLED_SERVICES+=,c-sch,c-api,c-vol
             ENABLED_SERVICES+=,q-svc,ovn-controller,ovn-northd,q-ovn-metadata-agent
+            # CRITICAL: Use single-cell setup (no multi-cell)
+            NOVA_NUM_CELLS=0
 
       - name: Wait for DevStack to stabilize
         run: sleep 30
