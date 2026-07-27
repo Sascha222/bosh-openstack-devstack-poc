@@ -322,6 +322,16 @@ jobs:
           echo "  FIX: Update Keystone Glance Endpoint"
           echo "=========================================="
 
+          # Source OpenStack credentials
+          if [ -f "./devstack/openrc" ]; then
+            source ./devstack/openrc admin admin
+          elif [ -f "/opt/stack/devstack/openrc" ]; then
+            source /opt/stack/devstack/openrc admin admin
+          else
+            echo "ERROR: openrc not found!"
+            exit 1
+          fi
+
           # Get actual Glance port
           GLANCE_PORT=$(sudo ss -tlnp | grep -E "glance|uwsgi" | grep -oP '127\.0\.0\.1:\K[0-9]+' | head -1)
           echo "Glance port: $GLANCE_PORT"
