@@ -864,6 +864,18 @@ jobs:
           echo "Flavor: m1.small"
           echo ""
 
+          # Start tcpdump to capture HTTP traffic between Nova and Glance
+          echo "Starting tcpdump to capture Nova <-> Glance traffic..."
+          GLANCE_PORT=$(sudo ss -tlnp | grep -E "glance|uwsgi" | grep -oP '127\.0\.0\.1:\K[0-9]+' | head -1 || echo "60999")
+          echo "Glance port: $GLANCE_PORT"
+
+          # Start tcpdump in background, capture to file
+          sudo tcpdump -i lo -nn "port $GLANCE_PORT" -w /tmp/glance-traffic.pcap -v &
+          TCPDUMP_PID=$!
+          echo "tcpdump PID: $TCPDUMP_PID"
+          sleep 2  # Let tcpdump initialize
+          echo ""
+
           # Create VM from stemcell
           echo "Creating VM from stemcell..."
 
@@ -884,16 +896,38 @@ jobs:
             echo "❌ VM creation command failed with exit code: $VM_CREATE_EXIT"
             echo ""
 
-            echo "=== Nova Compute Logs (last 100 lines) ==="
-            sudo journalctl -u devstack@n-cpu.service --no-pager -n 100 | grep -A 5 -B 5 "ERROR\|GlanceConnectionFailed\|502\|Proxy Error" || sudo journalctl -u devstack@n-cpu.service --no-pager -n 100
+            # Stop tcpdump
+            echo "Stopping tcpdump..."
+            sudo kill $TCPDUMP_PID 2>/dev/null || true
+            sleep 1
+
+            echo "=== HTTP Traffic Analysis (Nova <-> Glance) ==="
+            if [ -f /tmp/glance-traffic.pcap ]; then
+              echo "Analyzing captured traffic..."
+              sudo tcpdump -r /tmp/glance-traffic.pcap -nn -A 2>/dev/null | head -200 || echo "No traffic captured"
+            else
+              echo "No traffic capture file found"
+            fi
+            echo ""
+
+            echo "=== Nova Compute Logs (last 200 lines - FULL ERROR CONTEXT) ==="
+            sudo journalctl -u devstack@n-cpu.service --no-pager -n 200
 
             echo ""
-            echo "=== Nova API Logs (last 50 lines) ==="
-            sudo journalctl -u devstack@n-api.service --no-pager -n 50 | grep -A 5 -B 5 "ERROR\|GlanceConnectionFailed" || sudo journalctl -u devstack@n-api.service --no-pager -n 50
+            echo "=== Nova API Logs (last 100 lines) ==="
+            sudo journalctl -u devstack@n-api.service --no-pager -n 100
+
+            echo ""
+            echo "=== Glance API Logs (last 200 lines - CHECK FOR STREAMING ERRORS) ==="
+            sudo journalctl -u devstack@g-api.service --no-pager -n 200
 
             echo ""
             echo "=== Current Nova Glance Config ==="
             sudo grep -A 10 "\[glance\]" /etc/nova/nova.conf
+
+            echo ""
+            echo "=== Current Glance Config (Timeouts) ==="
+            sudo grep -E "client_socket_timeout|send_timeout|workers" /etc/glance/glance-api.conf
 
             echo ""
             echo "=== Test direct Glance connection ==="
@@ -915,27 +949,74 @@ jobs:
             if [ "$STATUS" = "ACTIVE" ]; then
               echo ""
               echo "✅ VM is ACTIVE!"
+
+              # Stop tcpdump
+              echo "Stopping tcpdump..."
+              sudo kill $TCPDUMP_PID 2>/dev/null || true
+              sleep 1
+
               break
             elif [ "$STATUS" = "ERROR" ]; then
               echo ""
               echo "❌ VM went to ERROR state!"
+
+              # Stop tcpdump first
+              echo "Stopping tcpdump..."
+              sudo kill $TCPDUMP_PID 2>/dev/null || true
+              sleep 1
+
+              echo ""
+              echo "=== HTTP Traffic Analysis (Nova <-> Glance) ==="
+              if [ -f /tmp/glance-traffic.pcap ]; then
+                echo "Analyzing captured traffic..."
+                echo "Total packets captured:"
+                sudo tcpdump -r /tmp/glance-traffic.pcap -nn 2>/dev/null | wc -l || echo "0"
+                echo ""
+                echo "First 100 packets (with ASCII):"
+                sudo tcpdump -r /tmp/glance-traffic.pcap -nn -A 2>/dev/null | head -300 || echo "No traffic captured"
+              else
+                echo "No traffic capture file found"
+              fi
+              echo ""
+
               openstack server show bosh-stemcell-test-vm
 
               echo ""
-              echo "=== Nova Compute Logs (last 100 lines) ==="
-              sudo journalctl -u devstack@n-cpu.service --no-pager -n 100 | grep -A 5 -B 5 "ERROR\|GlanceConnectionFailed\|502\|Proxy Error" || sudo journalctl -u devstack@n-cpu.service --no-pager -n 100
+              echo "=== Nova Compute Logs (last 300 lines - FULL CONTEXT) ==="
+              sudo journalctl -u devstack@n-cpu.service --no-pager -n 300
 
               echo ""
-              echo "=== Nova API Logs (last 50 lines) ==="
-              sudo journalctl -u devstack@n-api.service --no-pager -n 50 | grep -A 5 -B 5 "ERROR\|GlanceConnectionFailed" || sudo journalctl -u devstack@n-api.service --no-pager -n 50
+              echo "=== Nova API Logs (last 100 lines) ==="
+              sudo journalctl -u devstack@n-api.service --no-pager -n 100
 
               echo ""
-              echo "=== Nova Conductor Logs (last 50 lines) ==="
-              sudo journalctl -u devstack@n-cond.service --no-pager -n 50 2>/dev/null | grep -A 5 -B 5 "ERROR\|GlanceConnectionFailed" || true
+              echo "=== Glance API Logs (last 300 lines - CHECK STREAMING ERRORS) ==="
+              sudo journalctl -u devstack@g-api.service --no-pager -n 300
+
+              echo ""
+              echo "=== Nova Conductor Logs (last 100 lines) ==="
+              sudo journalctl -u devstack@n-cond.service --no-pager -n 100 2>/dev/null || true
 
               echo ""
               echo "=== Current Nova Glance Config ==="
               sudo grep -A 10 "\[glance\]" /etc/nova/nova.conf
+
+              echo ""
+              echo "=== Current Glance Config (Timeouts & Backend) ==="
+              sudo grep -E "client_socket_timeout|send_timeout|workers|filesystem_store_datadir" /etc/glance/glance-api.conf
+
+              echo ""
+              echo "=== Check Glance image file exists ==="
+              GLANCE_STORE_PATH=$(sudo grep filesystem_store_datadir /etc/glance/glance-api.conf | cut -d'=' -f2 | tr -d ' ' || echo "/var/lib/glance/images")
+              echo "Glance store path: $GLANCE_STORE_PATH"
+              if [ -f "${GLANCE_STORE_PATH}/$IMAGE_ID" ]; then
+                echo "✅ Image file exists: ${GLANCE_STORE_PATH}/$IMAGE_ID"
+                ls -lh "${GLANCE_STORE_PATH}/$IMAGE_ID"
+              else
+                echo "❌ Image file NOT found at ${GLANCE_STORE_PATH}/$IMAGE_ID"
+                echo "Files in store:"
+                sudo ls -lh "$GLANCE_STORE_PATH" || true
+              fi
 
               echo ""
               echo "=== Test direct Glance connection from Nova host ==="
