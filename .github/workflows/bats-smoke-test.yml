@@ -263,15 +263,17 @@ jobs:
           echo "Current Glance endpoints:"
           openstack endpoint list --service glance
 
-          # Update internal endpoint to use direct port
-          INTERNAL_ENDPOINT_ID=$(openstack endpoint list --service glance --interface internal -f value -c ID)
-          if [ -n "$INTERNAL_ENDPOINT_ID" ]; then
+          # Update public endpoint (DevStack only creates public, not internal)
+          PUBLIC_ENDPOINT_ID=$(openstack endpoint list --service glance --interface public -f value -c ID)
+          if [ -n "$PUBLIC_ENDPOINT_ID" ]; then
             echo ""
-            echo "Updating internal endpoint to http://127.0.0.1:${GLANCE_PORT}"
-            openstack endpoint set --url "http://127.0.0.1:${GLANCE_PORT}" "$INTERNAL_ENDPOINT_ID"
-            echo "✅ Keystone endpoint updated"
+            echo "Updating public endpoint to http://127.0.0.1:${GLANCE_PORT}"
+            openstack endpoint set --url "http://127.0.0.1:${GLANCE_PORT}" "$PUBLIC_ENDPOINT_ID"
+            echo "✅ Keystone public endpoint updated"
           else
-            echo "⚠️ No internal endpoint found"
+            echo "⚠️ No public endpoint found - creating one"
+            GLANCE_SERVICE_ID=$(openstack service list -f value -c ID -c Name | grep glance | awk '{print $1}')
+            openstack endpoint create --region RegionOne "$GLANCE_SERVICE_ID" public "http://127.0.0.1:${GLANCE_PORT}"
           fi
 
           echo ""

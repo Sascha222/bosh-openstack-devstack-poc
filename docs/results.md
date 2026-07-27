@@ -76,7 +76,7 @@ return 1
 
 ### Run 6 - SUCCESS! ✅ (2026-07-10)
 **Status:** ✅ SUCCESS  
-**Run:** https://github.com/Sascha222/bosh-openstack-devstack-poc/actions/runs/29082718957  
+**Source:** [Run 6](https://github.com/Sascha222/bosh-openstack-devstack-poc/actions/runs/29082718957)  
 **Duration:** 11m 20s  
 **Datum:** 2026-07-10
 
@@ -95,6 +95,13 @@ Enabled Services:
   - c-sch, c-api, c-vol (Cinder - Block Storage)
   - q-svc (Neutron API)
   - ovn-controller, ovn-northd, q-ovn-metadata-agent (OVN Networking)
+```
+
+#### System Resources (Measured):
+```
+CPU: 2 cores (GitHub Actions standard)
+RAM: ~16GB (tmpfs shows 7.9G = 50% of physical RAM)
+Disk: 110GB available after cleanup (df -h output)
 ```
 
 #### Verifizierte OpenStack Services:
@@ -135,20 +142,23 @@ Failed to download stemcell from bosh.io
 
 ### Run 2 - VM Creation Failed with Ubuntu Image (2026-07-10)
 **Status:** ❌ FAILED  
+**Source:** [Run 2 logs](https://github.com/Sascha222/bosh-openstack-devstack-poc/actions) (specific run ID not documented)  
 **Fehler:** VM geht in ERROR Status
 
 ```
 VM Status: BUILD → BUILD → ERROR
 ```
 
-**Root Cause:** Ubuntu Cloud Image (~600MB) zu groß für GitHub Actions ohne Nested Virtualization  
-**Fix:** Auf Cirros Test Image gewechselt (~13MB)
+**Root Cause:** Unknown - VM went to ERROR state with 600MB Ubuntu Cloud Image  
+**Observation:** Cirros (~13MB) succeeded, Ubuntu Cloud Image (~600MB) failed  
+**Possible causes:** Image size, timeout, resource constraints, or Glance-related issue  
+**Fix:** Switched to Cirros test image (~13MB)
 
 ---
 
 ### Run 3 - SUCCESS! ✅ (2026-07-10)
 **Status:** ✅ SUCCESS  
-**Run:** https://github.com/Sascha222/bosh-openstack-devstack-poc/actions/runs/29092040017  
+**Source:** [Run 3](https://github.com/Sascha222/bosh-openstack-devstack-poc/actions/runs/29092040017)  
 **Duration:** ~12 minutes  
 
 #### Tests Completed:
@@ -174,7 +184,7 @@ Time:    ~30 seconds to ACTIVE
 
 ### Run 4 - Extended CPI Operations Test ✅ (2026-07-13)
 **Status:** ✅ SUCCESS  
-**Run:** https://github.com/Sascha222/bosh-openstack-devstack-poc/actions/runs/29254127235  
+**Source:** [Run 4](https://github.com/Sascha222/bosh-openstack-devstack-poc/actions/runs/29254127235)  
 **Duration:** ~14 minutes  
 **Datum:** 2026-07-13
 
@@ -281,21 +291,22 @@ Für funktionierendes DevStack benötigt:
 ### Phase 2: BOSH CPI Integration
 
 1. **Stemcell Alternativen**
-   - BOSH Stemcells: ~3GB, Download unreliable
-   - Ubuntu Cloud Images: ~600MB, zu groß für GitHub Actions
-   - **Cirros Test Image: ~13MB, perfekt für CI** ✅
+   - BOSH Stemcells: ~3GB (measured), passen auf Disk (110GB measured via `df -h`)
+   - BOSH Stemcells: Upload zu Glance schlägt fehl (413 error, 15+ attempts documented in troubleshooting.md)
+   - Ubuntu Cloud Image: ~600MB, VM creation failed (ERROR state) - root cause unknown
+   - **Cirros Test Image: ~13MB, funktioniert perfekt** ✅ (verified in [Run 3](https://github.com/Sascha222/bosh-openstack-devstack-poc/actions/runs/29092040017))
 
 2. **VM Creation funktioniert**
-   - Trotz fehlender Nested Virtualization (KVM)
-   - QEMU Emulation ausreichend für kleine VMs
-   - Cirros startet in ~30 Sekunden
+   - Cirros (~13MB) boots successfully in ~30 seconds (measured in Run 3)
+   - Ubuntu Cloud Image (~600MB) failed - root cause unknown (Run 2)
+   - Stemcells not tested with actual VMs (blocked by Glance 413 upload error)
 
 3. **CPI Operations validiert**
-   - VM Create/Delete Cycle funktioniert ✅
-   - Volume Attach/Detach funktioniert ✅
-   - Custom Networks/Subnets funktionieren ✅
-   - Security Groups funktionieren ✅
-   - OpenStack APIs vollständig nutzbar
+   - VM Create/Delete Cycle funktioniert ✅ (verified in [Run 3](https://github.com/Sascha222/bosh-openstack-devstack-poc/actions/runs/29092040017))
+   - Volume Attach/Detach funktioniert ✅ (verified in [Run 4](https://github.com/Sascha222/bosh-openstack-devstack-poc/actions/runs/29254127235))
+   - Custom Networks/Subnets funktionieren ✅ (verified in Run 4)
+   - Security Groups funktionieren ✅ (verified in Run 4)
+   - OpenStack APIs vollständig nutzbar (all core services operational in [Run 6](https://github.com/Sascha222/bosh-openstack-devstack-poc/actions/runs/29082718957))
    
 4. **Nicht getestete Operationen**
    - Floating IPs (external connectivity)
@@ -334,16 +345,17 @@ Für funktionierendes DevStack benötigt:
 ## Bekannte Einschränkungen
 
 ### DevStack in GitHub Actions
-- ❌ **Keine Nested Virtualization:** KVM nicht verfügbar, nur QEMU Emulation
-- ⚠️ **Limitierte Ressourcen:** 2 CPU, 7GB RAM, 14GB Disk
-- ⚠️ **Langsame VM Performance:** QEMU statt KVM
+- ❌ **Glance 413 Error:** Cannot upload images >1GB (Stemcells blocked). Source: 15+ attempts documented in `troubleshooting.md`
+- ⚠️ **Limitierte CPU:** 2 cores. Source: [GitHub Actions docs](https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners)
+- ✅ **RAM:** ~16GB available. Source: Measured via `tmpfs 7.9G /dev/shm` (50% of physical RAM) in [Run 6](https://github.com/Sascha222/bosh-openstack-devstack-poc/actions/runs/29082718957)
+- ✅ **Disk Space:** 110GB ausreichend für Stemcells (~3GB). Source: `df -h` after cleanup in [Run 6](https://github.com/Sascha222/bosh-openstack-devstack-poc/actions/runs/29082718957)
 - ⚠️ **Logs nicht persistent:** Nach Workflow-Ende verloren (außer als Artifacts)
-- ✅ **Für funktionale CPI Tests ausreichend:** Alle benötigten APIs verfügbar
+- ✅ **Für funktionale CPI Tests:** Alle benötigten APIs verfügbar (mit Cirros)
 
 ### Workarounds für Production Tests
-- **Self-hosted Runner:** Mehr Ressourcen + Nested Virtualization
+- **Self-hosted Runner:** Mehr Ressourcen, keine Glance Limits
 - **Dedicated VM:** z.B. auf SAP Converged Cloud
-- **Real BOSH Stemcells:** Benötigen mehr Disk/RAM
+- **Real BOSH Stemcells:** Benötigen Glance-Upload-Fix oder externe Glance
 
 ---
 
@@ -373,22 +385,28 @@ Für funktionierendes DevStack benötigt:
 ✅ **JA, mit Einschränkungen**
 
 **Vorteile:**
-- Schnelles Setup (~11 Min)
-- Alle benötigten OpenStack APIs verfügbar
+- Schnelles Setup (~11 Min, measured in [Run 6](https://github.com/Sascha222/bosh-openstack-devstack-poc/actions/runs/29082718957))
+- Alle benötigten OpenStack APIs verfügbar (verified in Run 6)
 - Kostenlos in GitHub Actions
-- VM Lifecycle funktioniert (Create/Delete)
+- VM Lifecycle funktioniert mit Cirros (Create/Delete in ~30s, verified in Run 3)
 - Reproduzierbar und automatisierbar
 
 **Einschränkungen:**
-- Keine Nested Virtualization (nur QEMU)
-- Nur kleine VMs (m1.tiny, m1.small)
-- Kein KVM-Performance
-- Keine echten BOSH Stemcells (zu groß)
+- Glance 413 error blockiert Stemcell uploads (>1GB). Source: 15+ attempts documented in `troubleshooting.md`
+- Cirros (~13MB) funktioniert, aber nicht repräsentativ für echte Stemcells
+- Nur kleine Images getestet (Cirros 13MB works, Ubuntu 600MB failed)
+- Ubuntu Cloud Image (~600MB) fehlgeschlagen - Ursache unklar (no error logs captured)
 
 **Empfehlung:**
-- ✅ **Geeignet für:** Funktionale CPI Tests, API-Validierung, Smoke Tests
-- ⚠️ **Nicht geeignet für:** Performance Tests, große VMs, Production-ähnliche Szenarien
-- 🎯 **Use Case:** Ideal für Pull Request Validation und schnelles Feedback
+- ✅ **Geeignet für:** Funktionale CPI Tests mit Cirros, API-Validierung, Smoke Tests
+- ❌ **Nicht geeignet für:** Tests mit echten Stemcells (Glance 413 error - documented in troubleshooting.md)
+- ⚠️ **Ungetestet:** Resource constraints for BOSH Director (16GB RAM should be sufficient, 2 CPU impact unknown)
+- 🎯 **Use Case:** Ideal für Pull Request Validation mit Cirros (~13MB images)
+
+**Sources:**
+- System specs: [Run 6](https://github.com/Sascha222/bosh-openstack-devstack-poc/actions/runs/29082718957) - `df -h` and `tmpfs` measurements
+- VM lifecycle tests: [Run 3](https://github.com/Sascha222/bosh-openstack-devstack-poc/actions/runs/29092040017) and [Run 4](https://github.com/Sascha222/bosh-openstack-devstack-poc/actions/runs/29254127235)
+- Glance 413 error: Documented in `docs/troubleshooting.md` with 15+ failed configuration attempts
 
 ---
 

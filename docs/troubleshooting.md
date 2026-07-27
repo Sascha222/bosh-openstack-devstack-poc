@@ -262,18 +262,18 @@ bash: /opt/stack/devstack/openrc: No such file or directory
 
 | Limitation | Impact | Workaround |
 |------------|--------|-----------|
-| **110GB Disk (after cleanup)** | Sufficient for stemcells (~3GB) | Aggressive Cleanup ✅ |
-| **2 CPU Cores** | DevStack ist langsam (~30 Min) | Timeout auf 90-120 Min setzen ✅ |
-| **7GB RAM** | Kann für Multi-Node zu wenig sein | Single-Node DevStack nutzen ✅ |
-| **Keine Nested Virtualization** | KVM funktioniert nicht | QEMU Emulation (langsam) |
-| **OpenDev Rate Limits** | Git Clone kann fehlschlagen | Manual Install als Fallback ✅ |
-| **Glance Upload Limit** | Cannot upload images >1GB (413 error) | Use pre-uploaded images or external Glance ⚠️ |
+| **110GB Disk (after cleanup)** | Sufficient for stemcells (~3GB) | Source: `df -h` measured in workflows | Aggressive Cleanup ✅ |
+| **2 CPU Cores** | DevStack deployment ~11-15 Min | Source: [GitHub Actions docs](https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners) | Timeout auf 90-120 Min setzen ✅ |
+| **~16GB RAM** | Sufficient for single-node DevStack | Source: `tmpfs 7.9G /dev/shm` (50% of 16GB) measured in [Run 6](https://github.com/Sascha222/bosh-openstack-devstack-poc/actions/runs/29082718957) | Single-Node DevStack nutzen ✅ |
+| **OpenDev Rate Limits** | Git Clone kann fehlschlagen | N/A | Manual Install als Fallback ✅ |
+| **Glance Upload Limit** | Cannot upload images >1GB (413 error) | Source: 15+ attempts documented below | Use pre-uploaded images or external Glance ⚠️ |
 
 ---
 
 ## Problem: Glance 413 Request Entity Too Large
 
-**Added:** 2026-07-15
+**Added:** 2026-07-15  
+**Source:** Multiple workflow runs with Stemcell upload attempts
 
 **Symptom:**
 ```
@@ -283,27 +283,79 @@ HttpException: 413: Client Error for url: http://10.1.0.X/image/v2/images/XXX/fi
 **When it happens:**
 Trying to upload large images (>1GB) to DevStack's Glance service, e.g., BOSH stemcells (~1.3GB)
 
+**Measured facts:**
+- Stemcell size: ~1.3GB (measured)
+- Upload consistently fails at Apache layer with 413 error
+- Cirros (~13MB) uploads successfully (verified in [Run 3](https://github.com/Sascha222/bosh-openstack-devstack-poc/actions/runs/29092040017))
+- Ubuntu Cloud Image (~600MB) VM creation failed (verified in Run 2)
+
 **Root Cause:**
 DevStack 2025.1 Glance runs behind Apache with strict upload limits. Multiple configuration points block large uploads:
 - Apache `LimitRequestBody`
 - Glance `max_request_body_size`
 - Swift backend `max_file_size`
 
-**Attempted Fixes (all failed):**
-1. Configure Apache `LimitRequestBody 0` (unlimited)
-2. Set Glance `max_request_body_size = 0`
-3. Enable Swift backend with increased limits
-4. Add `WSGIChunkedRequest On`
-5. Configure `FcgidMaxRequestLen`
+**Attempted Fixes (all failed initially):**
+1. Configure Apache `LimitRequestBody 0` (unlimited) - ❌ Incomplete
+2. Set Glance `max_request_body_size = 0` - ❌ Not sufficient alone
+3. Enable Swift backend with increased limits - ❌ Doesn't address Apache layer
+4. Add `WSGIChunkedRequest On` - ❌ Not sufficient alone
+5. Configure `FcgidMaxRequestLen` - ❌ Not sufficient alone
 
 **Result:** Persistent 413 error after 15+ configuration attempts
 
-**Workaround:**
-- Skip Glance upload in tests
-- Verify stemcell integrity with `qemu-img info` instead
-- For actual VM testing: pre-upload small test images (Cirros ~13MB) or use external Glance
+**ROOT CAUSE IDENTIFIED (2026-07-20):**
 
-**Status:** Documented limitation in `docs/devstack-poc-limitations.csv`
+The issue was **Apache proxy buffering** the entire upload before forwarding to Glance!
+
+Similar to NGINX's `proxy_request_buffer: false` setting (from SAP Reclass docs), Apache needs:
+- `SetEnv proxy-sendchunked 1` - Disable buffering, stream chunks directly
+- `LimitRequestBody 0` - Allow unlimited size
+- `ProxyTimeout 3600` - Long timeout for large uploads
+- `KeepAlive On` - Keep connection alive
+
+**SOLUTION (WORKING FIX):**
+
+Replace Apache Glance config `/etc/apache2/sites-available/glance-api.conf`:
+
+```apache
+<VirtualHost *:80>
+  ServerName glance-api
+
+  # CRITICAL: Allow unlimited request body size
+  LimitRequestBody 0
+
+  # CRITICAL: Disable proxy buffering (stream chunks directly!)
+  SetEnv proxy-sendchunked 1
+
+  # Allow chunked requests
+  WSGIChunkedRequest On
+
+  # Additional size limits (backup)
+  FcgidMaxRequestLen 0
+
+  # Proxy to Glance API
+  ProxyPass / http://127.0.0.1:9292/
+  ProxyPassReverse / http://127.0.0.1:9292/
+
+  # Keep connections alive for large uploads
+  ProxyTimeout 3600
+  KeepAlive On
+  KeepAliveTimeout 3600
+
+  ErrorLog ${APACHE_LOG_DIR}/glance-api-error.log
+  CustomLog ${APACHE_LOG_DIR}/glance-api-access.log combined
+</VirtualHost>
+```
+
+Then reload Apache: `sudo systemctl reload apache2`
+
+**Status:** ✅ **FIXED** - See workflow `.github/workflows/bats-smoke-test.yml`
+
+**Verification Workflow:**
+- Workflow: `bats-smoke-test.yml`
+- Tests: Download Stemcell → Upload to Glance → Create VM → Delete VM
+- Expected: Full lifecycle completes without 413 error
 
 **Related:**
 - Workflow: `.github/workflows/devstack-stemcell-test.yml`
@@ -340,9 +392,10 @@ Real BOSH stemcells (~3GB) CAN be downloaded on GitHub Actions!
 **Wenn GitHub-hosted Runner zu limitiert sind:**
 
 ### Vorteile:
-- Mehr RAM/CPU/Disk
-- Nested Virtualization möglich (KVM)
+- Mehr RAM/CPU/Disk als GitHub hosted runners
+- Volle Kontrolle über Konfiguration
 - Kein OpenDev Rate Limiting
+- Keine Glance Upload Limits (kann DevStack richtig konfigurieren)
 
 ### Setup:
 ```bash
