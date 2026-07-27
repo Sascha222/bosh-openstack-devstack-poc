@@ -316,6 +316,40 @@ jobs:
           echo ""
           echo "✅ Nova configured for direct Glance access (bypassing Apache proxy)"
 
+      - name: Update Keystone Glance endpoint to use direct port
+        run: |
+          echo "=========================================="
+          echo "  FIX: Update Keystone Glance Endpoint"
+          echo "=========================================="
+
+          # Get actual Glance port
+          GLANCE_PORT=$(sudo ss -tlnp | grep -E "glance|uwsgi" | grep -oP '127\.0\.0\.1:\K[0-9]+' | head -1)
+          echo "Glance port: $GLANCE_PORT"
+
+          # Get Glance service ID
+          GLANCE_SERVICE_ID=$(openstack service list -f value -c ID -c Name | grep glance | awk '{print $1}')
+          echo "Glance service ID: $GLANCE_SERVICE_ID"
+
+          # Get current endpoints
+          echo ""
+          echo "=== Current Glance Endpoints ==="
+          openstack endpoint list --service glance
+
+          # Update internal endpoint to use direct port
+          INTERNAL_ENDPOINT_ID=$(openstack endpoint list --service glance --interface internal -f value -c ID)
+          if [ -n "$INTERNAL_ENDPOINT_ID" ]; then
+            echo ""
+            echo "Updating internal endpoint to http://127.0.0.1:${GLANCE_PORT}"
+            openstack endpoint set --url "http://127.0.0.1:${GLANCE_PORT}" "$INTERNAL_ENDPOINT_ID"
+          fi
+
+          echo ""
+          echo "=== Updated Glance Endpoints ==="
+          openstack endpoint list --service glance
+
+          echo ""
+          echo "✅ Keystone Glance endpoint updated"
+
       - name: Verify Nova Glance configuration
         run: |
           echo "=========================================="
