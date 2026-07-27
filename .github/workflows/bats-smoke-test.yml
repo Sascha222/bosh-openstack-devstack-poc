@@ -929,7 +929,12 @@ jobs:
 
               echo ""
               echo "=== Test direct Glance connection from Nova host ==="
-              GLANCE_PORT=$(sudo grep -oP 'bind_port = \K[0-9]+' /etc/glance/glance-api.conf 2>/dev/null | head -1 || echo "9292")
+              # Get actual port from listening sockets
+              GLANCE_PORT=$(sudo ss -tlnp | grep -E "glance|uwsgi" | grep -oP '127\.0\.0\.1:\K[0-9]+' | head -1)
+              if [ -z "$GLANCE_PORT" ]; then
+                GLANCE_PORT="60999"  # fallback
+              fi
+              echo "Glance port: $GLANCE_PORT"
               echo "Testing http://127.0.0.1:${GLANCE_PORT}/v2/images..."
               curl -s -I -H "X-Auth-Token: $(openstack token issue -f value -c id)" "http://127.0.0.1:${GLANCE_PORT}/v2/images" || echo "Direct connection FAILED"
 
