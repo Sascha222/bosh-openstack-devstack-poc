@@ -247,37 +247,61 @@ jobs:
           sudo grep -A 5 "\[glance\]" "$NOVA_CONF" || echo "No [glance] section found"
           echo ""
 
-          # Configure Nova to use direct Glance endpoint (bypass Apache)
-          # CRITICAL: Set both api_servers AND disable endpoint_override from catalog
+          # STEP 1: Update Keystone endpoint FIRST (before Nova reads it)
+          echo "=== STEP 1: Update Keystone Glance Endpoint ==="
+
+          # Source OpenStack credentials
+          if [ -f "./devstack/openrc" ]; then
+            source ./devstack/openrc admin admin
+          elif [ -f "/opt/stack/devstack/openrc" ]; then
+            source /opt/stack/devstack/openrc admin admin
+          else
+            echo "ERROR: openrc not found!"
+            exit 1
+          fi
+
+          echo "Current Glance endpoints:"
+          openstack endpoint list --service glance
+
+          # Update internal endpoint to use direct port
+          INTERNAL_ENDPOINT_ID=$(openstack endpoint list --service glance --interface internal -f value -c ID)
+          if [ -n "$INTERNAL_ENDPOINT_ID" ]; then
+            echo ""
+            echo "Updating internal endpoint to http://127.0.0.1:${GLANCE_PORT}"
+            openstack endpoint set --url "http://127.0.0.1:${GLANCE_PORT}" "$INTERNAL_ENDPOINT_ID"
+            echo "✅ Keystone endpoint updated"
+          else
+            echo "⚠️ No internal endpoint found"
+          fi
+
+          echo ""
+          echo "Updated endpoints:"
+          openstack endpoint list --service glance
+          echo ""
+
+          # STEP 2: Update nova.conf
+          echo "=== STEP 2: Update nova.conf ==="
           sudo crudini --set "$NOVA_CONF" glance api_servers "http://127.0.0.1:${GLANCE_PORT}"
           sudo crudini --set "$NOVA_CONF" glance endpoint_override "http://127.0.0.1:${GLANCE_PORT}"
-
-          # Also ensure we're not using the service catalog for glance
           sudo crudini --set "$NOVA_CONF" glance valid_interfaces "internal,public"
 
-          # Verify
-          echo "=== AFTER ==="
+          echo "Nova Glance config:"
           sudo grep -A 5 "\[glance\]" "$NOVA_CONF"
           echo ""
 
-          # CRITICAL: Verify Glance is actually running on the port BEFORE restarting Nova
-          echo "=== Verifying Glance is accessible on port ${GLANCE_PORT} ==="
+          # STEP 3: Verify Glance is accessible BEFORE restarting Nova
+          echo "=== STEP 3: Verify Glance is accessible ==="
           if ! curl -s -f -o /dev/null "http://127.0.0.1:${GLANCE_PORT}/"; then
             echo "❌ Glance is NOT accessible on port ${GLANCE_PORT}"
-            echo ""
-            echo "Checking Glance service status..."
             sudo systemctl status devstack@g-api.service --no-pager || true
-            echo ""
-            echo "Checking what's listening on ports..."
             sudo ss -tlnp | grep -E ":(9292|60)" || true
-            echo ""
+
             echo "Attempting to restart Glance..."
             sudo systemctl restart devstack@g-api.service
             sleep 5
 
             if ! curl -s -f -o /dev/null "http://127.0.0.1:${GLANCE_PORT}/"; then
-              echo "❌ Glance STILL not accessible after restart!"
-              echo "Checking Glance logs..."
+              echo "❌ Glance STILL not accessible!"
               sudo journalctl -u devstack@g-api.service --no-pager -n 50
               exit 1
             fi
@@ -285,14 +309,12 @@ jobs:
           echo "✅ Glance is accessible on port ${GLANCE_PORT}"
           echo ""
 
-          # Restart Nova services (only those that exist)
-          echo "Restarting Nova services..."
+          # STEP 4: NOW restart Nova (it will read the updated Keystone endpoint + nova.conf)
+          echo "=== STEP 4: Restart Nova services ==="
           for service in n-api n-cpu n-cond n-sch; do
             if sudo systemctl list-units --full --all | grep -q "devstack@${service}.service"; then
               echo "Restarting devstack@${service}.service..."
-              sudo systemctl restart "devstack@${service}.service" || echo "Warning: Failed to restart ${service}"
-            else
-              echo "Skipping devstack@${service}.service (not found)"
+              sudo systemctl restart "devstack@${service}.service" || echo "⚠️ Failed to restart ${service}"
             fi
           done
 
@@ -308,57 +330,11 @@ jobs:
               else
                 echo "✗ ${service}"
               fi
-            else
-              echo "- ${service} (not installed)"
             fi
           done
 
           echo ""
-          echo "✅ Nova configured for direct Glance access (bypassing Apache proxy)"
-
-      - name: Update Keystone Glance endpoint to use direct port
-        run: |
-          echo "=========================================="
-          echo "  FIX: Update Keystone Glance Endpoint"
-          echo "=========================================="
-
-          # Source OpenStack credentials
-          if [ -f "./devstack/openrc" ]; then
-            source ./devstack/openrc admin admin
-          elif [ -f "/opt/stack/devstack/openrc" ]; then
-            source /opt/stack/devstack/openrc admin admin
-          else
-            echo "ERROR: openrc not found!"
-            exit 1
-          fi
-
-          # Get actual Glance port
-          GLANCE_PORT=$(sudo ss -tlnp | grep -E "glance|uwsgi" | grep -oP '127\.0\.0\.1:\K[0-9]+' | head -1)
-          echo "Glance port: $GLANCE_PORT"
-
-          # Get Glance service ID
-          GLANCE_SERVICE_ID=$(openstack service list -f value -c ID -c Name | grep glance | awk '{print $1}')
-          echo "Glance service ID: $GLANCE_SERVICE_ID"
-
-          # Get current endpoints
-          echo ""
-          echo "=== Current Glance Endpoints ==="
-          openstack endpoint list --service glance
-
-          # Update internal endpoint to use direct port
-          INTERNAL_ENDPOINT_ID=$(openstack endpoint list --service glance --interface internal -f value -c ID)
-          if [ -n "$INTERNAL_ENDPOINT_ID" ]; then
-            echo ""
-            echo "Updating internal endpoint to http://127.0.0.1:${GLANCE_PORT}"
-            openstack endpoint set --url "http://127.0.0.1:${GLANCE_PORT}" "$INTERNAL_ENDPOINT_ID"
-          fi
-
-          echo ""
-          echo "=== Updated Glance Endpoints ==="
-          openstack endpoint list --service glance
-
-          echo ""
-          echo "✅ Keystone Glance endpoint updated"
+          echo "✅ Nova restarted with direct Glance endpoint"
 
       - name: Verify Nova Glance configuration
         run: |
