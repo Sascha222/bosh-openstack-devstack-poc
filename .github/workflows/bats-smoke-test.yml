@@ -54,7 +54,8 @@ jobs:
             FORCE=yes
             disable_service horizon tempest
             # Core services with OVN networking
-            ENABLED_SERVICES=mysql,rabbit,key,n-api,n-cpu,n-cond,n-sch,placement-api
+            # Note: n-cond (Nova Conductor) removed - not available in 2025.1
+            ENABLED_SERVICES=mysql,rabbit,key,n-api,n-cpu,n-sch,placement-api
             ENABLED_SERVICES+=,g-api,g-reg
             ENABLED_SERVICES+=,c-sch,c-api,c-vol
             ENABLED_SERVICES+=,q-svc,ovn-controller,ovn-northd,q-ovn-metadata-agent
