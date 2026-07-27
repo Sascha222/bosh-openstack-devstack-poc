@@ -211,13 +211,23 @@ jobs:
           GLANCE_CONF="/etc/glance/glance-api.conf"
           NOVA_CONF="/etc/nova/nova.conf"
 
-          # Get Glance port
-          GLANCE_PORT=$(sudo grep -oP 'bind_port = \K[0-9]+' "$GLANCE_CONF" 2>/dev/null | head -1)
+          # CRITICAL: Get ACTUAL port Glance is listening on, not what's in config
+          echo "=== Finding actual Glance port ==="
+          GLANCE_PORT=$(sudo ss -tlnp | grep glance | awk '{print $4}' | cut -d: -f2 | head -1)
+
           if [ -z "$GLANCE_PORT" ]; then
-            GLANCE_PORT="9292"
+            echo "WARNING: Could not detect Glance port from listening sockets"
+            echo "Trying config file..."
+            GLANCE_PORT=$(sudo grep -oP 'bind_port = \K[0-9]+' "$GLANCE_CONF" 2>/dev/null | head -1)
           fi
 
-          echo "Glance API Port: $GLANCE_PORT"
+          if [ -z "$GLANCE_PORT" ]; then
+            echo "ERROR: Could not find Glance port!"
+            sudo ss -tlnp | grep -E ":(9292|60)"
+            exit 1
+          fi
+
+          echo "Glance API Port (actual): $GLANCE_PORT"
           echo "Configuring Nova to use http://127.0.0.1:${GLANCE_PORT}"
           echo ""
 
