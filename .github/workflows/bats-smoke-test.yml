@@ -281,8 +281,34 @@ jobs:
           openstack endpoint list --service glance
           echo ""
 
-          # STEP 2: Update nova.conf
-          echo "=== STEP 2: Update nova.conf ==="
+          # STEP 2: Configure Glance for large image downloads
+          echo "=== STEP 2: Configure Glance timeouts for 1.3GB downloads ==="
+
+          # CRITICAL: Increase timeouts for large stemcell downloads
+          # Without these, Glance closes connection after ~60s when streaming 1.3GB
+          sudo crudini --set "$GLANCE_CONF" DEFAULT client_socket_timeout 3600
+          sudo crudini --set "$GLANCE_CONF" DEFAULT send_timeout 3600
+
+          echo "Glance timeout config:"
+          sudo crudini --get "$GLANCE_CONF" DEFAULT client_socket_timeout
+          sudo crudini --get "$GLANCE_CONF" DEFAULT send_timeout
+          echo ""
+
+          # Restart Glance to apply timeout settings
+          echo "Restarting Glance with new timeouts..."
+          sudo systemctl restart devstack@g-api.service
+          sleep 5
+
+          if ! sudo systemctl is-active --quiet devstack@g-api.service; then
+            echo "❌ Glance failed to restart!"
+            sudo journalctl -u devstack@g-api.service --no-pager -n 50
+            exit 1
+          fi
+          echo "✅ Glance restarted successfully"
+          echo ""
+
+          # STEP 3: Update nova.conf
+          echo "=== STEP 3: Update nova.conf ==="
           sudo crudini --set "$NOVA_CONF" glance api_servers "http://127.0.0.1:${GLANCE_PORT}"
           sudo crudini --set "$NOVA_CONF" glance endpoint_override "http://127.0.0.1:${GLANCE_PORT}"
           sudo crudini --set "$NOVA_CONF" glance valid_interfaces "internal,public"
@@ -291,7 +317,7 @@ jobs:
           sudo grep -A 5 "\[glance\]" "$NOVA_CONF"
           echo ""
 
-          # STEP 3: Verify Glance is accessible BEFORE restarting Nova
+          # STEP 4: Verify Glance is accessible BEFORE restarting Nova
           echo "=== STEP 3: Verify Glance is accessible ==="
           if ! curl -s -f -o /dev/null "http://127.0.0.1:${GLANCE_PORT}/"; then
             echo "❌ Glance is NOT accessible on port ${GLANCE_PORT}"
@@ -311,7 +337,7 @@ jobs:
           echo "✅ Glance is accessible on port ${GLANCE_PORT}"
           echo ""
 
-          # STEP 4: NOW restart Nova (it will read the updated Keystone endpoint + nova.conf)
+          # STEP 5: NOW restart Nova (it will read the updated Keystone endpoint + nova.conf)
           echo "=== STEP 4: Restart Nova services ==="
           for service in n-api n-cpu n-cond n-sch; do
             if sudo systemctl list-units --full --all | grep -q "devstack@${service}.service"; then
