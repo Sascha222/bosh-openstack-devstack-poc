@@ -313,8 +313,14 @@ jobs:
           sudo crudini --set "$NOVA_CONF" glance endpoint_override "http://127.0.0.1:${GLANCE_PORT}"
           sudo crudini --set "$NOVA_CONF" glance valid_interfaces "internal,public"
 
+          # CRITICAL: Also increase Nova's own timeout for image downloads
+          sudo crudini --set "$NOVA_CONF" DEFAULT image_download_timeout 3600
+
           echo "Nova Glance config:"
-          sudo grep -A 5 "\[glance\]" "$NOVA_CONF"
+          sudo grep -A 10 "\[glance\]" "$NOVA_CONF"
+          echo ""
+          echo "Nova image download timeout:"
+          sudo crudini --get "$NOVA_CONF" DEFAULT image_download_timeout || echo "Not set (using default)"
           echo ""
 
           # STEP 4: Verify Glance is accessible BEFORE restarting Nova
