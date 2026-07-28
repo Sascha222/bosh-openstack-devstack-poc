@@ -679,51 +679,76 @@ jobs:
           echo ""
 
           # Find Glance's filesystem store path
-          GLANCE_STORE_PATH=$(sudo grep -A5 "\[glance_store\]" /etc/glance/glance-api.conf | grep filesystem_store_datadir | cut -d'=' -f2 | tr -d ' ' || echo "/var/lib/glance/images")
+          GLANCE_STORE_PATH=$(sudo grep -A5 "\[glance_store\]" /etc/glance/glance-api.conf | grep filesystem_store_datadir | cut -d'=' -f2 | tr -d ' ' | sed 's:/$::' || echo "/var/lib/glance/images")
 
           if [ -z "$GLANCE_STORE_PATH" ]; then
             GLANCE_STORE_PATH="/var/lib/glance/images"
           fi
 
-          # Remove trailing slash to avoid double-slash in file:// URL
-          GLANCE_STORE_PATH="${GLANCE_STORE_PATH%/}"
+          # CRITICAL: Remove trailing slash to avoid double-slash in file:// URL
+          # Use sed as backup in case the inline sed above didn't work
+          GLANCE_STORE_PATH=$(echo "$GLANCE_STORE_PATH" | sed 's:/$::')
 
-          echo "Glance filesystem store: $GLANCE_STORE_PATH"
+          echo "Glance filesystem store: '$GLANCE_STORE_PATH'"
+          echo "Path ends with: '$(echo "$GLANCE_STORE_PATH" | tail -c 2)'"
           echo ""
 
           # Create directory if it doesn't exist
           sudo mkdir -p "$GLANCE_STORE_PATH"
 
           # Clean up any old files with this IMAGE_ID (including malformed paths with double-slash)
-          echo "Cleaning up old image files..."
+          # CRITICAL: Clean up ALL possible variations of the path to ensure no old files remain
+          echo "Cleaning up old image files (all possible paths)..."
+
+          # Remove correct path
           sudo rm -f "${GLANCE_STORE_PATH}/${IMAGE_ID}" 2>/dev/null || true
+
+          # Remove with trailing directory
           sudo rm -f "${GLANCE_STORE_PATH}/${IMAGE_ID}/"* 2>/dev/null || true
 
-          # CRITICAL: Also remove files with double-slash from previous runs
-          # Old runs created: /opt/stack/data/glance/images//IMAGE_ID (note the //)
-          # This is the ACTUAL file that exists and blocks VM creation!
+          # Remove double-slash variations (from old runs where normalization failed)
           sudo rm -f "${GLANCE_STORE_PATH}//${IMAGE_ID}" 2>/dev/null || true
+          sudo rm -f "/opt/stack/data/glance/images//${IMAGE_ID}" 2>/dev/null || true
+
+          # Remove triple-slash (in case cleanup ran with un-normalized path)
+          sudo rm -f "${GLANCE_STORE_PATH}///${IMAGE_ID}" 2>/dev/null || true
+          sudo rm -f "/opt/stack/data/glance/images///${IMAGE_ID}" 2>/dev/null || true
 
           echo "Verifying cleanup..."
-          if [ -f "${GLANCE_STORE_PATH}/${IMAGE_ID}" ] || [ -f "${GLANCE_STORE_PATH}//${IMAGE_ID}" ]; then
-            echo "⚠️  WARNING: Old image file still exists after cleanup!"
-            ls -lh "${GLANCE_STORE_PATH}/"*"${IMAGE_ID}" 2>/dev/null || true
+          FOUND_FILES=$(sudo find "$(dirname "$GLANCE_STORE_PATH")" -name "*${IMAGE_ID}*" 2>/dev/null | wc -l)
+          if [ "$FOUND_FILES" -gt 0 ]; then
+            echo "⚠️  WARNING: Found $FOUND_FILES file(s) still matching IMAGE_ID!"
+            sudo find "$(dirname "$GLANCE_STORE_PATH")" -name "*${IMAGE_ID}*" -ls 2>/dev/null || true
           else
-            echo "✅ Old files cleaned up successfully"
+            echo "✅ All old files cleaned up successfully"
           fi
 
           # Copy image directly to Glance's store with the image ID as filename
           echo "Copying image to Glance store..."
-          sudo cp image "${GLANCE_STORE_PATH}/${IMAGE_ID}"
+          TARGET_PATH="${GLANCE_STORE_PATH}/${IMAGE_ID}"
+          echo "Source: image"
+          echo "Target: '$TARGET_PATH'"
+          sudo cp image "$TARGET_PATH"
+
+          # Verify what was actually created
+          echo "Verifying copy..."
+          if [ -f "$TARGET_PATH" ]; then
+            echo "✅ File created at correct location: $TARGET_PATH"
+            ls -lh "$TARGET_PATH"
+          else
+            echo "❌ File NOT at expected location: $TARGET_PATH"
+            echo "Searching for where it actually ended up..."
+            sudo find "$(dirname "$GLANCE_STORE_PATH")" -name "*${IMAGE_ID}*" -ls 2>/dev/null || true
+          fi
 
           # Try to set correct ownership (glance user in production, stack in DevStack)
           if id glance &>/dev/null; then
-            sudo chown glance:glance "${GLANCE_STORE_PATH}/${IMAGE_ID}"
+            sudo chown glance:glance "$TARGET_PATH"
           elif id stack &>/dev/null; then
-            sudo chown stack:stack "${GLANCE_STORE_PATH}/${IMAGE_ID}"
+            sudo chown stack:stack "$TARGET_PATH"
           else
             # Fallback: just make it readable
-            sudo chmod 644 "${GLANCE_STORE_PATH}/${IMAGE_ID}"
+            sudo chmod 644 "$TARGET_PATH"
           fi
 
           # Verify file exists
