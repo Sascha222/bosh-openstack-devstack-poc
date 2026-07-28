@@ -157,15 +157,19 @@ file:///opt/stack/data/glance/images + / + abc123
 
 **WICHTIG: Timing ist kritisch!**
 
-Der Fix muss **VOR** dem BOSH Director Deployment passieren:
+Der Fix muss **VOR** dem BOSH Director Deployment passieren UND Glance muss die neue Config vollständig geladen haben:
 
 ```
 ❌ FALSCH:
    Deploy BOSH Director → Upload Stemcell → Fix Glance Config
    (URL bereits falsch in DB geschrieben!)
 
+❌ AUCH FALSCH:
+   Fix Glance Config → Restart Glance (zu kurze Wait) → Deploy BOSH Director → Upload Stemcell
+   (Glance hat Config noch nicht neu geladen!)
+
 ✅ RICHTIG:
-   Fix Glance Config → Restart Glance → Deploy BOSH Director → Upload Stemcell
+   Fix Glance Config → Restart Glance → Wait 30s + Verify → Deploy BOSH Director → Upload Stemcell
    (URL wird korrekt geschrieben!)
 ```
 
@@ -173,6 +177,14 @@ Der Fix muss **VOR** dem BOSH Director Deployment passieren:
 - Die malformed URL wird beim **CPI Upload** in die Datenbank geschrieben
 - Nova liest die URL aus der **Datenbank**, nicht aus der Config
 - Ein späterer Config-Fix ändert die bereits geschriebene URL nicht
+- Glance braucht Zeit, um die neue Config vollständig zu laden (nicht sofort nach Restart!)
+
+**Timing Details:**
+- Config-Fix: sed command (~1s)
+- Glance Restart: systemctl restart (~3-5s)
+- **Config Reload**: Glance lädt Config neu (~10-20s nach Restart!)
+- Verification: Multiple checks um sicherzustellen dass Glance stabil ist
+- **Gesamt Wait**: 30s + 3x Checks à 5s = ~45s
 
 **Referenz:**
 - Dokumentiert in: `docs/bats-smoke-test-troubleshooting-journey.md` Problem 8

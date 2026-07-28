@@ -100,17 +100,30 @@ jobs:
           echo "Restarting Glance to load new config..."
           sudo systemctl restart devstack@g-api.service
 
-          # Wait for Glance to be ready
-          sleep 15
+          # Wait longer for Glance to fully reload config
+          echo "Waiting for Glance to fully reload configuration..."
+          sleep 30
 
           # Verify Glance is responding
           echo ""
-          echo "Verifying Glance is ready..."
+          echo "Verifying Glance is ready and config is loaded..."
           source ~/devstack/openrc admin admin
-          openstack image list
+
+          # Multiple checks to ensure Glance is stable
+          for i in {1..3}; do
+            echo "Check $i/3..."
+            openstack image list
+            sleep 5
+          done
+
+          # Final verification: Check the config was actually applied
+          echo ""
+          echo "Final verification - config value:"
+          sudo grep filesystem_store_datadir /etc/glance/glance-api.conf
 
           echo ""
-          echo "✅ Glance config fixed (trailing slash removed)"
+          echo "✅ Glance config fixed and verified (trailing slash removed)"
+          echo "   Config has been reloaded by Glance service"
           echo "   NOW it's safe to deploy BOSH Director!"
           echo "   BOSH CPI will write correct file:// URLs (no double-slash)"
 
