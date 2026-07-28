@@ -102,7 +102,91 @@ with:
 
 ---
 
-### 2. BOSH CLI Installation
+### 2. Glance Filesystem Path Fix (VOR BOSH Deployment!)
+
+**KRITISCHER DevStack-Bugfix - MUSS VOR BOSH Director passieren!**
+
+```bash
+sudo sed -i 's|^\(filesystem_store_datadir\s*=\s*.*\)/$|\1|g' /etc/glance/glance-api.conf
+sudo systemctl restart devstack@g-api.service
+# Wait for Glance to reload config
+sleep 15
+```
+
+**Problem:**
+DevStack's Glance Config hat standardmäßig einen **trailing slash**:
+```ini
+filesystem_store_datadir = /opt/stack/data/glance/images/
+                                                        ↑ trailing slash
+```
+
+**Warum das ein Problem ist:**
+
+Wenn BOSH CPI ein Stemcell hochlädt, baut Glance die `file://` URL:
+```bash
+FILE_URL = "file://" + filesystem_store_datadir + "/" + image_id
+```
+
+**Mit trailing slash:**
+```
+file:///opt/stack/data/glance/images/ + / + abc123
+                                    ↑   ↑
+                              trailing  separator
+= file:///opt/stack/data/glance/images//abc123
+                                      ↑↑ DOPPEL-SLASH!
+```
+
+**Was passiert:**
+1. BOSH CPI schreibt malformed URL in `image_locations` Tabelle
+2. Nova liest URL aus Datenbank
+3. Glance kann Schema nicht aus malformed URL extrahieren
+4. `glance_store.exceptions.UnknownScheme: Unknown scheme '' found in URI`
+5. Nova bekommt Connection Reset → VM ERROR State
+
+**Die Lösung:**
+```ini
+filesystem_store_datadir = /opt/stack/data/glance/images
+                                                        ↑ KEIN trailing slash!
+```
+
+**Jetzt baut Glance:**
+```
+file:///opt/stack/data/glance/images + / + abc123
+= file:///opt/stack/data/glance/images/abc123  ✅ Korrekt!
+```
+
+**WICHTIG: Timing ist kritisch!**
+
+Der Fix muss **VOR** dem BOSH Director Deployment passieren:
+
+```
+❌ FALSCH:
+   Deploy BOSH Director → Upload Stemcell → Fix Glance Config
+   (URL bereits falsch in DB geschrieben!)
+
+✅ RICHTIG:
+   Fix Glance Config → Restart Glance → Deploy BOSH Director → Upload Stemcell
+   (URL wird korrekt geschrieben!)
+```
+
+**Warum?**
+- Die malformed URL wird beim **CPI Upload** in die Datenbank geschrieben
+- Nova liest die URL aus der **Datenbank**, nicht aus der Config
+- Ein späterer Config-Fix ändert die bereits geschriebene URL nicht
+
+**Referenz:**
+- Dokumentiert in: `docs/bats-smoke-test-troubleshooting-journey.md` Problem 8
+- Root Cause Analysis: Workflow Run vom 2026-07-28
+
+**Wichtig:**
+- Dies ist ein **DevStack Config-Bug**, kein Glance-Bug
+- Production OpenStack hat dieses Problem nicht
+- Der Fix ist eine Config-Korrektur, kein API-Bypass
+- BOSH CPI nutzt weiterhin den echten HTTP Upload-Pfad!
+
+---
+
+### 3. BOSH CLI Installation
 
 ```bash
 wget https://github.com/cloudfoundry/bosh-cli/releases/download/v7.8.2/bosh-cli-7.8.2-linux-amd64
@@ -117,7 +201,7 @@ sudo mv bosh /usr/local/bin/
 
 ---
 
-### 3. BOSH Deployment Manifests
+### 4. BOSH Deployment Manifests
 
 ```bash
 git clone https://github.com/cloudfoundry/bosh-deployment.git
@@ -137,7 +221,7 @@ git clone https://github.com/cloudfoundry/bosh-deployment.git
 
 ---
 
-### 4. OpenStack Konfiguration sammeln
+### 5. OpenStack Konfiguration sammeln
 
 ```bash
 source ~/devstack/openrc admin admin
@@ -174,7 +258,7 @@ az: nova
 
 ---
 
-### 5. BOSH Director Deployment
+### 6. BOSH Director Deployment
 
 ```bash
 bosh create-env ~/bosh-deployment/bosh.yml \
@@ -205,7 +289,7 @@ bosh create-env ~/bosh-deployment/bosh.yml \
 
 ---
 
-### 6. BOSH Environment konfigurieren
+### 7. BOSH Environment konfigurieren
 
 ```bash
 export BOSH_CLIENT=admin
@@ -229,7 +313,7 @@ bosh -e devstack login
 
 ---
 
-### 7. Stemcell Download
+### 8. Stemcell Download
 
 ```bash
 STEMCELL_VERSION=$(curl -s https://bosh.io/api/v1/stemcells/bosh-openstack-kvm-ubuntu-jammy-go_agent | jq -r '.[0].version')
@@ -251,7 +335,7 @@ wget -O stemcell.tgz "$STEMCELL_URL"
 
 ---
 
-### 8. Stemcell Upload via BOSH CPI
+### 9. Stemcell Upload via BOSH CPI
 
 ```bash
 bosh -e devstack upload-stemcell ~/stemcells/stemcell.tgz
@@ -279,12 +363,13 @@ bosh -e devstack upload-stemcell ~/stemcells/stemcell.tgz
 - ✅ Kein MySQL-Hack
 - ✅ Standard Glance HTTP API
 - ✅ Via BOSH CPI (wie in Production)
+- ✅ Trailing slash fix verhindert URL-Fehler
 
 **Dauer:** ~5-10 Minuten (Upload 1.3GB)
 
 ---
 
-### 9. Cloud Config erstellen
+### 10. Cloud Config erstellen
 
 ```yaml
 azs:
@@ -321,7 +406,7 @@ networks:
 
 ---
 
-### 10. Test VM Deployment
+### 11. Test VM Deployment
 
 ```yaml
 name: test-vm
@@ -375,7 +460,7 @@ bosh -e devstack -d test-vm deploy test-deployment.yml
 
 ---
 
-### 11. Verification
+### 12. Verification
 
 ```bash
 # Via BOSH
@@ -395,7 +480,7 @@ openstack server show <vm-id>
 
 ---
 
-### 12. Cleanup
+### 13. Cleanup
 
 ```bash
 bosh -e devstack -d test-vm delete-deployment --force
@@ -438,6 +523,8 @@ Nova creates VM
 ```
 Stemcell Download
   ↓
+FIX: Remove trailing slash from Glance config
+  ↓
 BOSH CLI upload-stemcell
   ↓
 BOSH Director
@@ -446,7 +533,7 @@ BOSH CPI
   ↓
 GLANCE HTTP API (PUT /v2/images/{id}/file)
   ↓
-Glance Storage
+Glance Storage (file:// URL korrekt!)
   ↓
 Nova creates VM
 ```
@@ -454,9 +541,14 @@ Nova creates VM
 **Vorteile:**
 - ✅ Nutzt echten BOSH CPI Upload-Pfad
 - ✅ Standard Glance HTTP API
-- ✅ Kein Workaround
+- ✅ Nur Config-Fix (kein API-Bypass!)
 - ✅ Relevant für BATS
 - ✅ Wie in Production
+
+**Der einzige "Workaround":**
+- DevStack Config-Bug (trailing slash) wird gefixed
+- Dies ist eine **Korrektur**, kein Workaround des Upload-Pfads
+- Production OpenStack hat diesen Config-Bug nicht
 
 ---
 
@@ -476,7 +568,12 @@ Client → Apache Proxy → Glance → Swift
 - Nur bei großen Files (>1GB)
 - DevStack-spezifisches Problem
 
-### Production hat dieses Problem NICHT:
+**Außerdem:**
+- Glance's filesystem backend hatte trailing slash Bug
+- Dieser Bug verhinderte erfolgreichen HTTP Upload
+- Bug ist jetzt gefixed (siehe Step 2)
+
+### Production hat diese Probleme NICHT:
 
 ```
 BOSH CPI → Glance (direkter Port) → Swift/Ceph
@@ -485,12 +582,13 @@ BOSH CPI → Glance (direkter Port) → Swift/Ceph
 - Kein Apache Proxy dazwischen
 - Swift/Ceph optimiert für große Objects
 - Production-Grade Load Balancer
+- Kein trailing slash Config-Bug
 
 ### Daher: Filesystem Backend akzeptabel
 
 **Was wir testen:**
 - ✅ BOSH CPI kann Glance API aufrufen
-- ✅ Glance kann große Images verarbeiten
+- ✅ Glance kann große Images verarbeiten (nach trailing slash Fix!)
 - ✅ Nova kann VMs von großen Images booten
 - ✅ BOSH Lifecycle funktioniert
 
@@ -502,6 +600,10 @@ BOSH CPI → Glance (direkter Port) → Swift/Ceph
 **Das ist OK für BATS!**
 
 BATS validieren **BOSH CPI Funktionalität**, nicht **Storage Backend Performance**.
+
+**Wichtig:**
+Der trailing slash Fix stellt sicher, dass der BOSH CPI Upload-Pfad funktioniert!
+Dies ist kein Workaround, sondern eine DevStack Config-Korrektur.
 
 ---
 
@@ -608,6 +710,7 @@ Error: VM failed to start
 
 ```
 DevStack Deployment:     ~10 Min
+Glance Config Fix:       ~1 Min   (NEU!)
 BOSH CLI Installation:   ~1 Min
 BOSH Director Deploy:    ~15 Min
 Stemcell Download:       ~3 Min (abhängig von Netzwerk)
@@ -632,17 +735,23 @@ GitHub Actions Runner: ✅ Ausreichend!
 
 **Dieser Test validiert:**
 1. ✅ BOSH Director kann in DevStack deployed werden
-2. ✅ BOSH CPI kann Stemcells hochladen (via HTTP API!)
-3. ✅ BOSH CPI kann VMs erstellen
-4. ✅ Stemcells können zu bootfähigen VMs werden
-5. ✅ BOSH kann VM Lifecycle managen
+2. ✅ DevStack Glance Config-Bug kann gefixed werden (trailing slash)
+3. ✅ BOSH CPI kann Stemcells hochladen (via HTTP API!)
+4. ✅ BOSH CPI kann VMs erstellen
+5. ✅ Stemcells können zu bootfähigen VMs werden
+6. ✅ BOSH kann VM Lifecycle managen
 
 **Das ist die Basis für:**
 - Vollständige BATS Tests
 - CPI Lifecycle Tests
 - Production-ähnliche Validierung
 
-**DevStack Limitation dokumentiert:**
-- Filesystem Backend (statt Swift)
+**DevStack Limitations dokumentiert:**
+- Filesystem Backend (statt Swift/Ceph)
+- Trailing slash Config-Bug (wird gefixed)
 - Für BATS Tests akzeptabel
-- Production nutzt Swift/Ceph ohne Apache Proxy Issue
+- Production nutzt Swift/Ceph ohne diese Issues
+
+**Wichtig:**
+Der trailing slash Fix ist eine **Config-Korrektur**, kein Workaround!
+BOSH CPI nutzt weiterhin den echten HTTP API Upload-Pfad.

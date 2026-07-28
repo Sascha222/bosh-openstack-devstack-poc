@@ -74,10 +74,11 @@ jobs:
 
           echo "✅ OpenStack is ready"
 
-      - name: Fix Glance filesystem path (remove trailing slash)
+      - name: Fix Glance filesystem path (remove trailing slash) BEFORE BOSH
         run: |
           echo "=== Fixing Glance filesystem_store_datadir trailing slash ==="
-          echo "This prevents 'Unknown scheme' errors when BOSH CPI uploads stemcells"
+          echo "⚠️  CRITICAL: This MUST happen BEFORE BOSH Director deployment!"
+          echo "    Otherwise BOSH CPI will write malformed file:// URLs to image_locations table"
           echo ""
 
           # Show current config
@@ -95,18 +96,23 @@ jobs:
           sudo grep filesystem_store_datadir /etc/glance/glance-api.conf
 
           # Restart Glance to apply changes
+          echo ""
+          echo "Restarting Glance to load new config..."
           sudo systemctl restart devstack@g-api.service
 
           # Wait for Glance to be ready
-          sleep 10
+          sleep 15
 
           # Verify Glance is responding
+          echo ""
+          echo "Verifying Glance is ready..."
           source ~/devstack/openrc admin admin
           openstack image list
 
           echo ""
           echo "✅ Glance config fixed (trailing slash removed)"
-          echo "   This ensures BOSH CPI can upload stemcells via HTTP API!"
+          echo "   NOW it's safe to deploy BOSH Director!"
+          echo "   BOSH CPI will write correct file:// URLs (no double-slash)"
 
       - name: Install BOSH CLI
         run: |
