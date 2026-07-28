@@ -74,6 +74,40 @@ jobs:
 
           echo "✅ OpenStack is ready"
 
+      - name: Fix Glance filesystem path (remove trailing slash)
+        run: |
+          echo "=== Fixing Glance filesystem_store_datadir trailing slash ==="
+          echo "This prevents 'Unknown scheme' errors when BOSH CPI uploads stemcells"
+          echo ""
+
+          # Show current config
+          echo "Before fix:"
+          sudo grep filesystem_store_datadir /etc/glance/glance-api.conf || echo "Config not found"
+
+          # Remove trailing slash from Glance config
+          # This is CRITICAL to avoid double-slash in file:// URLs
+          # See: docs/bats-smoke-test-troubleshooting-journey.md Problem 8
+          sudo sed -i 's|^\(filesystem_store_datadir\s*=\s*.*\)/$|\1|g' /etc/glance/glance-api.conf
+
+          # Show fixed config
+          echo ""
+          echo "After fix:"
+          sudo grep filesystem_store_datadir /etc/glance/glance-api.conf
+
+          # Restart Glance to apply changes
+          sudo systemctl restart devstack@g-api.service
+
+          # Wait for Glance to be ready
+          sleep 10
+
+          # Verify Glance is responding
+          source ~/devstack/openrc admin admin
+          openstack image list
+
+          echo ""
+          echo "✅ Glance config fixed (trailing slash removed)"
+          echo "   This ensures BOSH CPI can upload stemcells via HTTP API!"
+
       - name: Install BOSH CLI
         run: |
           echo "=== Installing BOSH CLI ==="
