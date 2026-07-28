@@ -11,7 +11,7 @@
 ```
 1. DevStack Installation
    ↓
-2. Apache Glance Config Fix (für große Uploads)
+2. Glance Config (Timeouts für große Downloads)
    ↓
 3. Stemcell Download (~1.3GB von bosh.io)
    ↓
@@ -23,6 +23,8 @@
    ↓
 7. VM Cleanup
 ```
+
+**Hinweis:** Der Apache Reverse Proxy Config Step wurde entfernt (siehe unten warum).
 
 ---
 
@@ -51,88 +53,77 @@
   - `placement-api` = Placement (Resource Tracking)
 - `GLANCE_LIMIT_IMAGE_SIZE_TOTAL=0` = Keine Größenbeschränkung für Images
 
-**Wichtig:** DevStack läuft Apache als Reverse Proxy vor Glance auf Port 80.
+**Wichtig:** DevStack läuft Apache als Reverse Proxy vor Glance auf Port 80, aber wir umgehen dies später mit dem Filesystem-Workaround.
 
 ---
 
-### 2. Apache Glance Config Fix
+## ⚠️ Apache Reverse Proxy Config - NICHT MEHR VERWENDET
 
-```yaml
-- name: Fix Apache Glance Config for Large Uploads (THE FIX!)
-  run: |
-    APACHE_GLANCE_CONF="/etc/apache2/sites-available/glance-api.conf"
-    
-    # Check if config exists
-    if [ ! -f "$APACHE_GLANCE_CONF" ]; then
-      echo "ERROR: Apache Glance config not found!"
-      exit 1
-    fi
-    
-    # Create the FIXED config
-    sudo tee "$APACHE_GLANCE_CONF" > /dev/null <<'EOF'
-<VirtualHost *:80>
-  ServerName glance-api
+**Dieser Abschnitt erklärt einen Schritt der NICHT mehr im Workflow ist!**
+Er ist hier dokumentiert für das Verständnis der Evolution und für Referenz.
 
-  # CRITICAL: Allow unlimited request body size
-  LimitRequestBody 0
+### Was ist ein Reverse Proxy?
 
-  # CRITICAL: Disable proxy buffering - stream chunks directly!
-  SetEnv proxy-sendchunked 1
-
-  # Allow chunked transfer encoding
-  WSGIChunkedRequest On
-
-  # Proxy to Glance (dynamic port detection later)
-  ProxyPass / http://127.0.0.1:9292/
-  ProxyPassReverse / http://127.0.0.1:9292/
-
-  # Long timeout for large uploads
-  ProxyTimeout 3600
-  KeepAlive On
-  KeepAliveTimeout 3600
-
-  ErrorLog ${APACHE_LOG_DIR}/glance-api-error.log
-  CustomLog ${APACHE_LOG_DIR}/glance-api-access.log combined
-</VirtualHost>
-EOF
-    
-    # Reload Apache
-    sudo apache2ctl configtest
-    sudo systemctl reload apache2
+**Einfach erklärt:**
+```
+Client → Apache (Empfang) → Backend-Services (Glance, Nova, etc.)
 ```
 
-**Warum ist das wichtig?**
+Apache ist wie eine Empfangsdame im Bürogebäude:
+- Du kommst zum Eingang (Port 80)
+- Apache fragt: "Zu welchem Service willst du?"
+- `/image` → Leitet zu Glance (Port 60999)
+- `/compute` → Leitet zu Nova (Port 8774)
+- `/identity` → Leitet zu Keystone (Port 5000)
 
-Apache buffert standardmäßig den **gesamten Upload** bevor er zu Glance weitergeleitet wird. Bei 1.3GB führt das zu:
+### Das Problem mit Apache und großen Uploads
+
+**Apache buffert standardmäßig Requests:**
+```
+Client sendet 1.3GB → Apache sammelt ALLES ein → dann zu Glance
+                       (1.3GB in RAM/Disk!)
+```
+
+**Problem:** Bei 1.3GB führt das zu:
 - Memory-Problemen
-- Disk-Space-Problemen
-- HTTP 413 "Request Entity Too Large" Errors
+- Disk-Space-Problemen  
+- HTTP 413 "Request Entity Too Large"
 
-**Die kritischen Settings:**
+### Der (auskommentierte) Apache Fix
 
-1. **`LimitRequestBody 0`**
-   - Erlaubt unbegrenzte Upload-Größe
-   - Standard: oft 100MB-1GB
+**Was der Fix gemacht hätte:**
+```apache
+SetEnv proxy-sendchunked 1  # ← Streaming statt Buffering!
+LimitRequestBody 0           # Erlaube unbegrenzte Größe
+ProxyTimeout 3600            # 1 Stunde Timeout
+```
 
-2. **`SetEnv proxy-sendchunked 1`** ⭐ **MOST IMPORTANT!**
-   - Deaktiviert Apache's Request-Buffering
-   - Streamt Chunks direkt zu Glance
-   - Äquivalent zu NGINX's `proxy_request_buffering off`
+**Mit diesem Fix:**
+```
+Client sendet 1.3GB → Apache streamt Chunks direkt → zu Glance
+                       (kein Buffering!)
+```
 
-3. **`WSGIChunkedRequest On`**
-   - Erlaubt chunked transfer encoding
-   - Notwendig für Streaming
+### Warum wird der Fix NICHT verwendet?
 
-4. **`ProxyTimeout 3600`**
-   - 1-Stunden Timeout für lange Uploads
+**Timeline:**
+1. **Commits 1-12:** Versuch HTTP-Upload über Apache
+   - Apache-Config-Fix hinzugefügt
+   - ❌ Immer noch Connection Reset
 
-**Ohne diese Config:** Apache buffert 1.3GB → Out of Memory → Upload scheitert
+2. **Ab Commit 13:** Filesystem-Workaround
+   - Datei wird direkt kopiert (umgeht Apache!)
+   - ✅ Funktioniert zuverlässig
 
-**Mit dieser Config:** Apache streamt Chunks → kein Buffering → Upload funktioniert
+3. **Aktuell:** Apache-Step ist auskommentiert
+   - Wird nicht mehr ausgeführt
+   - Behalten für Referenz/spätere HTTP-Upload-Tests
+
+**Siehe:** `.github/workflows/bats-smoke-test.yml` (auskommentierter Code mit Dokumentation)
 
 ---
 
-### 3. Stemcell Download
+### 2. Glance Config (Timeouts für Downloads)
 
 ```yaml
 - name: Download BOSH Stemcell
@@ -243,7 +234,7 @@ SQL
 **Warum dieser komplexe Workaround?**
 
 **Problem:** Glance hat Probleme mit HTTP-Uploads von großen Images (~1GB+):
-- Connection Reset
+- Connection Reset (auch MIT Apache-Streaming-Fix!)
 - Timeouts
 - Memory-Probleme
 
@@ -255,7 +246,10 @@ SQL
    - `size` und `checksum`
    - `image_locations` mit `file://` URL
 
-**Wichtig:** Das funktioniert nur in DevStack (Development)! Production nutzt Swift/Ceph.
+**Wichtig:** 
+- Das funktioniert nur in DevStack (Development)! 
+- Production nutzt Swift/Ceph.
+- Umgeht Apache komplett → deshalb ist Apache-Config nicht nötig!
 
 ---
 
@@ -567,25 +561,32 @@ Wenn Nova vor dem Keystone-Update startet, cached es den alten Apache-Endpoint!
 
 ## Zusammenfassung: Warum ist das so komplex?
 
-### Problem 1: Apache kann große Uploads nicht handhaben
+### Problem 1: Apache buffert große Uploads (HISTORISCH - nicht mehr relevant)
 - **Symptom:** HTTP 413 oder Connection Reset
 - **Ursache:** Apache buffert gesamten Upload
-- **Lösung:** `SetEnv proxy-sendchunked 1` (Streaming statt Buffering)
+- **Versuchte Lösung:** `SetEnv proxy-sendchunked 1` (Streaming statt Buffering)
+- **Resultat:** ❌ HTTP-Upload scheiterte trotzdem
+- **Status:** Apache-Config auskommentiert, wird nicht verwendet
 
 ### Problem 2: Glance HTTP-Upload ist instabil für große Files
-- **Symptom:** Connection Reset trotz Apache-Fix
+- **Symptom:** Connection Reset (auch MIT Apache-Streaming-Fix!)
 - **Ursache:** Glance/Eventlet Probleme mit ~1GB+ HTTP-Body
-- **Lösung:** Filesystem-Workaround (direktes Kopieren)
+- **Lösung:** ✅ Filesystem-Workaround (direktes Kopieren)
 
 ### Problem 3: Nova würde über Apache downloaden
 - **Symptom:** HTTP 502 Proxy Error beim VM-Create
 - **Ursache:** Keystone Endpoint zeigt auf Apache Port 80
-- **Lösung:** Endpoint auf direkten Glance-Port ändern
+- **Lösung:** ✅ Endpoint auf direkten Glance-Port ändern
 
 ### Problem 4: Glance schließt Verbindung bei langem Download
 - **Symptom:** RemoteDisconnected nach ~60s
 - **Ursache:** Default Socket-Timeout zu kurz
-- **Lösung:** `client_socket_timeout = 3600` (1 Stunde)
+- **Lösung:** ✅ `client_socket_timeout = 3600` (1 Stunde)
+
+### Problem 5: Malformed file:// URL (Doppel-Slash)
+- **Symptom:** `Unknown scheme '' found in URI`
+- **Ursache:** Trailing slash in Glance Config → `file:///path//image`
+- **Lösung:** ✅ `GLANCE_STORE_PATH="${GLANCE_STORE_PATH%/}"`
 
 ---
 
@@ -596,7 +597,7 @@ Wenn Nova vor dem Keystone-Update startet, cached es den alten Apache-Endpoint!
 │                    GitHub Actions                       │
 │                                                         │
 │  1. DevStack installiert                               │
-│  2. Apache Config gefixt                               │
+│  2. Glance Config (Timeouts)                           │
 │  3. Stemcell (1.3GB) gedownloadet                      │
 │  4. Stemcell zu Glance Filesystem kopiert (Workaround)│
 │  5. Nova Config: Bypass Apache                         │
@@ -631,42 +632,55 @@ Wenn Nova vor dem Keystone-Update startet, cached es den alten Apache-Endpoint!
 
 ## Key Takeaways
 
-1. **Apache `SetEnv proxy-sendchunked 1` ist kritisch** für große Uploads (verhindert Buffering)
+1. **Apache Reverse Proxy** wird in DevStack verwendet, aber für Stemcell-Upload NICHT benötigt
+   - Apache-Config-Fix ist auskommentiert (siehe Workflow-Code)
+   - Filesystem-Workaround umgeht Apache komplett
 
 2. **Filesystem-Workaround** ist die einzige zuverlässige Methode für ~1GB+ in DevStack Glance
+   - HTTP-Upload scheiterte auch MIT Apache-Streaming-Fix
+   - Direktes Kopieren + MySQL-Update funktioniert zuverlässig
 
 3. **Keystone Endpoint** muss auf direkten Glance-Port zeigen, nicht auf Apache
+   - Für Downloads (Nova → Glance)
+   - Apache würde HTTP 502 verursachen
 
 4. **Glance Timeouts** müssen hoch genug sein für lange Downloads (3600s = 1h)
+   - Standard 60s ist zu kurz für 1.3GB
 
-5. **Reihenfolge ist wichtig:**
+5. **Path-Normalisierung** ist kritisch
+   - Trailing slash entfernen: `GLANCE_STORE_PATH="${GLANCE_STORE_PATH%/}"`
+   - Verhindert malformed `file://` URLs mit Doppel-Slash
+
+6. **Reihenfolge ist wichtig:**
    - Keystone Endpoint ändern
    - Glance Config + Restart
    - Nova Config
    - Nova Restart
 
-6. **`upload_stemcell.py` wird NICHT verwendet** weil es auch Connection-Resets hatte
+7. **`upload_stemcell.py` wird NICHT verwendet** weil es auch Connection-Resets hatte
 
-7. **Production-Systeme** sollten Swift/Ceph nutzen, nicht file:// Backend
+8. **Production-Systeme** sollten Swift/Ceph nutzen, nicht file:// Backend
 
 ---
 
 ## Debugging-Tipps
 
 **Wenn Upload fehlschlägt:**
-- Apache Logs: `/var/log/apache2/glance-api-error.log`
 - Glance Logs: `journalctl -u devstack@g-api.service`
-- Check Apache Config: `LimitRequestBody` und `proxy-sendchunked`
+- ~~Apache Logs: `/var/log/apache2/glance-api-error.log`~~ (nicht mehr relevant für Filesystem-Upload)
+- Check Filesystem: Datei existiert in `/opt/stack/data/glance/images/`?
+- Check MySQL: `image_locations` Eintrag vorhanden?
 
 **Wenn VM Creation fehlschlägt:**
 - Nova Compute Logs: `journalctl -u devstack@n-cpu.service`
 - Check Endpoint: `openstack endpoint list --service glance`
 - Check nova.conf: `grep -A 5 "\[glance\]" /etc/nova/nova.conf`
 - Check Glance Timeouts: `grep timeout /etc/glance/glance-api.conf`
+- Check file:// URL: Doppel-Slash? `file:///path//image` ist falsch!
 
 **Wenn Connection Reset:**
 - Glance Timeout zu kurz → erhöhen auf 3600s
-- Apache buffering aktiv → `SetEnv proxy-sendchunked 1` prüfen
+- ~~Apache buffering aktiv → `SetEnv proxy-sendchunked 1` prüfen~~ (nicht mehr relevant)
 
 ---
 
