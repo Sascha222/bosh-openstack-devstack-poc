@@ -355,7 +355,7 @@ FILE_LOCATION="file://${GLANCE_STORE_PATH}/${IMAGE_ID}"
 ### Was NICHT funktioniert (für 1.3GB Stemcells in DevStack)
 - ❌ HTTP Upload via Glance API (requests, curl)
 - ❌ Glance CLI Upload (auch mit direktem Port)
-- ❌ Apache als Proxy vor Glance
+- ❌ Apache als Proxy vor Glance (auch mit Streaming-Fix)
 - ❌ Verschiedene Content-Type Header
 - ❌ Chunked vs. Non-Chunked Encoding
 - ❌ Timeout-Erhöhungen in Glance Config
@@ -366,6 +366,24 @@ FILE_LOCATION="file://${GLANCE_STORE_PATH}/${IMAGE_ID}"
 - ✅ Auto-Detection (MySQL credentials, User, Ports)
 - ✅ Robuste Fehlerbehandlung
 - ✅ **Path-Normalisierung (trailing slash entfernen)**
+
+### Wichtiger Hinweis: Apache Config Fix
+
+Der Apache Config Fix (`SetEnv proxy-sendchunked 1`) wurde im Workflow **auskommentiert**.
+
+**Warum?**
+- Der Fix sollte Apache's Request-Buffering deaktivieren (Streaming statt Buffering)
+- HTTP-Upload scheiterte trotzdem mit Connection Reset
+- Der Filesystem-Workaround umgeht Apache komplett
+- → Der Apache-Fix wird nicht mehr benötigt
+
+**Status im Code:**
+- Commits 1-12: Verschiedene HTTP-Upload-Versuche mit Apache-Config-Fixes
+- Ab Commit 13: Filesystem-Workaround → Apache wird nicht mehr verwendet
+- Aktuell: Apache-Step ist auskommentiert für Referenz
+
+**Falls HTTP-Upload später getestet werden soll:**
+Der auskommentierte Code in `.github/workflows/bats-smoke-test.yml` zeigt die notwendige Apache-Konfiguration.
 
 ### Critical Details für Filesystem-Import
 1. **Path muss normalisiert sein** - keine trailing slashes!

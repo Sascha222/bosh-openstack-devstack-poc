@@ -63,88 +63,104 @@ jobs:
       - name: Wait for DevStack to stabilize
         run: sleep 30
 
-      - name: Fix Apache Glance Config for Large Uploads (THE FIX!)
-        run: |
-          echo "=========================================="
-          echo "  FIX: Configure Apache for Stemcells"
-          echo "=========================================="
-
-          # Find Apache Glance config
-          APACHE_GLANCE_CONF="/etc/apache2/sites-available/glance-api.conf"
-
-          if [ ! -f "$APACHE_GLANCE_CONF" ]; then
-            echo "ERROR: Apache Glance config not found at $APACHE_GLANCE_CONF"
-            echo "Searching for glance Apache configs..."
-            find /etc/apache2 -name "*glance*" 2>/dev/null || true
-            exit 1
-          fi
-
-          echo "Found Apache Glance config: $APACHE_GLANCE_CONF"
-          echo ""
-          echo "=== BEFORE (original config) ==="
-          sudo cat "$APACHE_GLANCE_CONF"
-          echo ""
-
-          # Backup original
-          sudo cp "$APACHE_GLANCE_CONF" "${APACHE_GLANCE_CONF}.backup"
-
-          # Extract the original Glance API port
-          GLANCE_PORT=$(sudo grep -oP 'http://127.0.0.1:\K[0-9]+' "$APACHE_GLANCE_CONF" | head -1)
-          if [ -z "$GLANCE_PORT" ]; then
-            GLANCE_PORT="9292"  # fallback to default
-          fi
-          echo "Detected Glance API port: $GLANCE_PORT"
-          echo ""
-
-          # CRITICAL FIX: Apache is rejecting application/octet-stream!
-          # We need to ensure mod_proxy is loaded and configured properly
-          echo "Enabling required Apache modules..."
-          sudo a2enmod proxy proxy_http headers rewrite 2>/dev/null || true
-
-          # Create MINIMAL config that just proxies everything through
-          # The key is: NO restrictions on Content-Type at Apache level!
-          sudo tee "$APACHE_GLANCE_CONF" > /dev/null <<EOF
-          # CRITICAL: Disable KeepAlive to avoid connection issues
-          KeepAlive Off
-
-          # CRITICAL: Enable chunked requests
-          SetEnv proxy-sendchunked 1
-
-          # CRITICAL: Allow unlimited request body size
-          LimitRequestBody 0
-
-          # CRITICAL: Long timeout for large uploads
-          ProxyTimeout 3600
-
-          # Proxy ALL requests to Glance API (no filtering!)
-          ProxyPass "/image" "http://127.0.0.1:${GLANCE_PORT}" retry=0 acquire=1
-          ProxyPassReverse "/image" "http://127.0.0.1:${GLANCE_PORT}"
-
-          # CRITICAL: Don't filter Content-Type headers!
-          ProxyPreserveHost On
-          EOF
-
-          echo "=== AFTER (fixed config) ==="
-          sudo cat "$APACHE_GLANCE_CONF"
-          echo ""
-
-          # Test Apache config
-          echo "Testing Apache config..."
-          sudo apache2ctl configtest
-
-          # Reload Apache
-          echo "Reloading Apache..."
-          sudo systemctl reload apache2
-          sleep 5
-
-          # Verify Apache is running
-          if ! sudo systemctl is-active --quiet apache2; then
-            echo "ERROR: Apache failed to reload!"
-            sudo systemctl status apache2 --no-pager
-            exit 1
-          fi
-
-          echo "✅ Apache configured and reloaded successfully!"
+      # NOTE: Apache Glance Config Fix - NOT CURRENTLY USED
+      #
+      # This step was created during early attempts to upload stemcells via HTTP.
+      # Apache (used as reverse proxy in DevStack) buffers large uploads by default,
+      # causing HTTP 413 or connection reset errors.
+      #
+      # The fix: SetEnv proxy-sendchunked 1 (enables streaming instead of buffering)
+      #
+      # HOWEVER: This step is now OBSOLETE because:
+      # 1. HTTP upload still failed even with Apache streaming fix
+      # 2. We use filesystem workaround instead (direct copy to /opt/stack/data/glance/images/)
+      # 3. Filesystem workaround bypasses Apache completely
+      #
+      # Kept here commented out for reference in case we want to test HTTP upload later.
+      # See docs/bats-smoke-test-troubleshooting-journey.md for full history.
+      #
+      # - name: Fix Apache Glance Config for Large Uploads
+      #   run: |
+      #     echo "=========================================="
+      #     echo "  FIX: Configure Apache for Stemcells"
+      #     echo "=========================================="
+      #
+      #     # Find Apache Glance config
+      #     APACHE_GLANCE_CONF="/etc/apache2/sites-available/glance-api.conf"
+      #
+      #     if [ ! -f "$APACHE_GLANCE_CONF" ]; then
+      #       echo "ERROR: Apache Glance config not found at $APACHE_GLANCE_CONF"
+      #       echo "Searching for glance Apache configs..."
+      #       find /etc/apache2 -name "*glance*" 2>/dev/null || true
+      #       exit 1
+      #     fi
+      #
+      #     echo "Found Apache Glance config: $APACHE_GLANCE_CONF"
+      #     echo ""
+      #     echo "=== BEFORE (original config) ==="
+      #     sudo cat "$APACHE_GLANCE_CONF"
+      #     echo ""
+      #
+      #     # Backup original
+      #     sudo cp "$APACHE_GLANCE_CONF" "${APACHE_GLANCE_CONF}.backup"
+      #
+      #     # Extract the original Glance API port
+      #     GLANCE_PORT=$(sudo grep -oP 'http://127.0.0.1:\K[0-9]+' "$APACHE_GLANCE_CONF" | head -1)
+      #     if [ -z "$GLANCE_PORT" ]; then
+      #       GLANCE_PORT="9292"  # fallback to default
+      #     fi
+      #     echo "Detected Glance API port: $GLANCE_PORT"
+      #     echo ""
+      #
+      #     # CRITICAL FIX: Apache is rejecting application/octet-stream!
+      #     # We need to ensure mod_proxy is loaded and configured properly
+      #     echo "Enabling required Apache modules..."
+      #     sudo a2enmod proxy proxy_http headers rewrite 2>/dev/null || true
+      #
+      #     # Create MINIMAL config that just proxies everything through
+      #     # The key is: NO restrictions on Content-Type at Apache level!
+      #     sudo tee "$APACHE_GLANCE_CONF" > /dev/null <<EOF
+      #     # CRITICAL: Disable KeepAlive to avoid connection issues
+      #     KeepAlive Off
+      #
+      #     # CRITICAL: Enable chunked requests
+      #     SetEnv proxy-sendchunked 1
+      #
+      #     # CRITICAL: Allow unlimited request body size
+      #     LimitRequestBody 0
+      #
+      #     # CRITICAL: Long timeout for large uploads
+      #     ProxyTimeout 3600
+      #
+      #     # Proxy ALL requests to Glance API (no filtering!)
+      #     ProxyPass "/image" "http://127.0.0.1:${GLANCE_PORT}" retry=0 acquire=1
+      #     ProxyPassReverse "/image" "http://127.0.0.1:${GLANCE_PORT}"
+      #
+      #     # CRITICAL: Don't filter Content-Type headers!
+      #     ProxyPreserveHost On
+      #     EOF
+      #
+      #     echo "=== AFTER (fixed config) ==="
+      #     sudo cat "$APACHE_GLANCE_CONF"
+      #     echo ""
+      #
+      #     # Test Apache config
+      #     echo "Testing Apache config..."
+      #     sudo apache2ctl configtest
+      #
+      #     # Reload Apache
+      #     echo "Reloading Apache..."
+      #     sudo systemctl reload apache2
+      #     sleep 5
+      #
+      #     # Verify Apache is running
+      #     if ! sudo systemctl is-active --quiet apache2; then
+      #       echo "ERROR: Apache failed to reload!"
+      #       sudo systemctl status apache2 --no-pager
+      #       exit 1
+      #     fi
+      #
+      #     echo "✅ Apache configured and reloaded successfully!"
 
       - name: Configure Glance for Large Uploads
         run: |
