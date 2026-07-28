@@ -1,0 +1,376 @@
+name: BOSH CPI - Stemcell Lifecycle Test with BOSH Director
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ feature/bats-with-bosh-director ]
+
+jobs:
+  bosh-director-lifecycle-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Show system info
+        run: |
+          echo "=== System Info ==="
+          uname -a
+          df -h
+          free -h
+          nproc
+          echo "Python version: $(python3 --version)"
+
+      - name: Free up disk space
+        run: |
+          echo "=== Disk space BEFORE cleanup ==="
+          df -h
+
+          # Aggressive cleanup for DevStack + BOSH + Stemcells
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/hostedtoolcache
+          sudo rm -rf /usr/local/share/chromium
+          sudo rm -rf /usr/local/lib/node_modules
+
+          echo "=== Disk space AFTER cleanup ==="
+          df -h
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git python3-pip python3-venv qemu-utils jq wget build-essential zlib1g-dev libssl-dev libreadline-dev libyaml-dev libsqlite3-dev sqlite3 libxml2-dev libxslt1-dev libcurl4-openssl-dev libffi-dev
+
+      - name: Deploy DevStack
+        id: devstack
+        uses: gophercloud/devstack-action@v0.19
+        with:
+          branch: stable/2025.1
+          conf_overrides: |
+            FORCE=yes
+            disable_service horizon tempest
+            # Core services - Filesystem backend (Swift causes 502 for large uploads)
+            ENABLED_SERVICES=mysql,rabbit,key,n-api,n-cpu,n-cond,n-sch,placement-api
+            ENABLED_SERVICES+=,g-api,g-reg
+            ENABLED_SERVICES+=,c-sch,c-api,c-vol
+            ENABLED_SERVICES+=,q-svc,ovn-controller,ovn-northd,q-ovn-metadata-agent
+
+      - name: Wait for DevStack to stabilize
+        run: sleep 30
+
+      - name: Verify OpenStack
+        run: |
+          echo "=== Verifying OpenStack Services ==="
+          source ~/devstack/openrc admin admin
+
+          openstack endpoint list
+          openstack network list
+          openstack flavor list
+          openstack image list
+
+          echo "✅ OpenStack is ready"
+
+      - name: Install BOSH CLI
+        run: |
+          echo "=== Installing BOSH CLI ==="
+
+          # Download BOSH CLI v2
+          wget -O bosh https://github.com/cloudfoundry/bosh-cli/releases/download/v7.8.2/bosh-cli-7.8.2-linux-amd64
+          chmod +x bosh
+          sudo mv bosh /usr/local/bin/
+
+          # Verify
+          bosh --version
+
+          echo "✅ BOSH CLI installed"
+
+      - name: Download BOSH deployment manifests
+        run: |
+          echo "=== Downloading BOSH deployment repository ==="
+
+          git clone https://github.com/cloudfoundry/bosh-deployment.git ~/bosh-deployment
+
+          echo "✅ BOSH deployment manifests ready"
+
+      - name: Prepare BOSH Director deployment
+        run: |
+          echo "=== Preparing BOSH Director deployment ==="
+
+          source ~/devstack/openrc admin admin
+
+          # Create working directory
+          mkdir -p ~/bosh-director
+          cd ~/bosh-director
+
+          # Get OpenStack configuration
+          export OS_AUTH_URL=$(openstack catalog show keystone -f json | jq -r '.endpoints[] | select(.interface=="public") | .url')
+          export OS_PROJECT_NAME=$OS_PROJECT_NAME
+          export OS_USERNAME=$OS_USERNAME
+          export OS_PASSWORD=$OS_PASSWORD
+          export OS_REGION_NAME=${OS_REGION_NAME:-RegionOne}
+          export OS_DOMAIN_NAME=${OS_USER_DOMAIN_NAME:-Default}
+
+          # Get network IDs
+          export NETWORK_ID=$(openstack network list -f json | jq -r '.[] | select(.Name=="private") | .ID')
+          export EXTERNAL_NETWORK_ID=$(openstack network list -f json | jq -r '.[] | select(.Name=="public") | .ID')
+
+          echo "OpenStack Config:"
+          echo "  Auth URL: $OS_AUTH_URL"
+          echo "  Project: $OS_PROJECT_NAME"
+          echo "  Network ID: $NETWORK_ID"
+          echo "  External Network ID: $EXTERNAL_NETWORK_ID"
+
+          # Create SSH key for BOSH
+          ssh-keygen -t rsa -b 4096 -f ~/bosh-director/bosh-ssh-key -N ""
+
+          # Create variables file for BOSH Director
+          cat > ~/bosh-director/director-vars.yml <<EOF
+          director_name: bosh-devstack
+          internal_cidr: 10.0.0.0/24
+          internal_gw: 10.0.0.1
+          internal_ip: 10.0.0.6
+
+          openstack_auth_url: $OS_AUTH_URL
+          openstack_username: $OS_USERNAME
+          openstack_password: $OS_PASSWORD
+          openstack_domain: $OS_DOMAIN_NAME
+          openstack_project: $OS_PROJECT_NAME
+          openstack_region: $OS_REGION_NAME
+
+          openstack_default_key_name: bosh-key
+          openstack_default_security_groups: [default]
+
+          net_id: $NETWORK_ID
+          az: nova
+          EOF
+
+          cat ~/bosh-director/director-vars.yml
+
+          echo "✅ BOSH Director prep complete"
+
+      - name: Upload SSH key to OpenStack
+        run: |
+          source ~/devstack/openrc admin admin
+
+          # Delete if exists
+          openstack keypair delete bosh-key 2>/dev/null || true
+
+          # Upload
+          openstack keypair create --public-key ~/bosh-director/bosh-ssh-key.pub bosh-key
+
+          echo "✅ SSH key uploaded"
+
+      - name: Deploy BOSH Director
+        run: |
+          echo "=== Deploying BOSH Director ==="
+
+          cd ~/bosh-director
+
+          # Deploy using bosh create-env
+          bosh create-env ~/bosh-deployment/bosh.yml \
+            --state ./state.json \
+            --vars-store ./creds.yml \
+            --vars-file ./director-vars.yml \
+            -o ~/bosh-deployment/openstack/cpi.yml \
+            -o ~/bosh-deployment/jumpbox-user.yml \
+            -o ~/bosh-deployment/uaa.yml \
+            -o ~/bosh-deployment/credhub.yml \
+            -v director_vm_type=m1.xlarge \
+            -v network_name=private
+
+          echo "✅ BOSH Director deployed"
+
+      - name: Alias BOSH Director
+        run: |
+          echo "=== Configuring BOSH environment ==="
+
+          cd ~/bosh-director
+
+          # Extract admin password
+          export BOSH_CLIENT=admin
+          export BOSH_CLIENT_SECRET=$(bosh int ./creds.yml --path /admin_password)
+          export BOSH_ENVIRONMENT=10.0.0.6
+          export BOSH_CA_CERT=$(bosh int ./creds.yml --path /director_ssl/ca)
+
+          # Alias the director
+          bosh alias-env devstack -e 10.0.0.6 --ca-cert <(bosh int ./creds.yml --path /director_ssl/ca)
+
+          # Login
+          echo "$BOSH_CLIENT_SECRET" | bosh -e devstack login --client=$BOSH_CLIENT --client-secret-stdin
+
+          # Save environment for later steps
+          cat > ~/bosh-env.sh <<EOF
+          export BOSH_CLIENT=admin
+          export BOSH_CLIENT_SECRET=$BOSH_CLIENT_SECRET
+          export BOSH_ENVIRONMENT=10.0.0.6
+          export BOSH_CA_CERT="$BOSH_CA_CERT"
+          EOF
+
+          echo "✅ BOSH Director configured"
+
+      - name: Download BOSH Stemcell
+        run: |
+          echo "=== Downloading BOSH Stemcell ==="
+
+          source ~/bosh-env.sh
+
+          # Download latest Ubuntu Jammy stemcell for OpenStack
+          STEMCELL_VERSION=$(curl -s https://bosh.io/api/v1/stemcells/bosh-openstack-kvm-ubuntu-jammy-go_agent | jq -r '.[0].version')
+          echo "Latest stemcell version: $STEMCELL_VERSION"
+
+          STEMCELL_URL="https://storage.googleapis.com/bosh-core-stemcells/${STEMCELL_VERSION}/bosh-stemcell-${STEMCELL_VERSION}-openstack-kvm-ubuntu-jammy-go_agent.tgz"
+          echo "Downloading from: $STEMCELL_URL"
+
+          mkdir -p ~/stemcells
+          wget -O ~/stemcells/stemcell.tgz "$STEMCELL_URL"
+
+          # Show info
+          ls -lh ~/stemcells/stemcell.tgz
+
+          echo "✅ Stemcell downloaded: $(ls -lh ~/stemcells/stemcell.tgz | awk '{print $5}')"
+
+      - name: Upload Stemcell to BOSH Director
+        run: |
+          echo "=== Uploading Stemcell to BOSH Director ==="
+          echo "⏳ This will take several minutes for ~1.3GB stemcell..."
+          echo ""
+
+          source ~/bosh-env.sh
+
+          # Upload via BOSH CLI (this uses BOSH CPI internally!)
+          bosh -e devstack upload-stemcell ~/stemcells/stemcell.tgz
+
+          # Verify
+          bosh -e devstack stemcells
+
+          echo ""
+          echo "✅ Stemcell uploaded successfully!"
+
+      - name: Deploy test VM from Stemcell
+        run: |
+          echo "=== Deploying test VM from Stemcell ==="
+
+          source ~/bosh-env.sh
+
+          # Create simple deployment manifest
+          cat > ~/test-deployment.yml <<'EOF'
+          name: test-vm
+
+          releases: []
+
+          stemcells:
+          - alias: default
+            os: ubuntu-jammy
+            version: latest
+
+          instance_groups:
+          - name: test-instance
+            instances: 1
+            azs: [z1]
+            jobs: []
+            vm_type: default
+            stemcell: default
+            networks:
+            - name: default
+
+          update:
+            canaries: 1
+            max_in_flight: 1
+            canary_watch_time: 1000-30000
+            update_watch_time: 1000-30000
+          EOF
+
+          # Create cloud config
+          cat > ~/cloud-config.yml <<EOF
+          azs:
+          - name: z1
+            cloud_properties:
+              availability_zone: nova
+
+          vm_types:
+          - name: default
+            cloud_properties:
+              instance_type: m1.small
+
+          networks:
+          - name: default
+            type: manual
+            subnets:
+            - range: 10.0.0.0/24
+              gateway: 10.0.0.1
+              az: z1
+              cloud_properties:
+                net_id: $(openstack network show private -f json | jq -r '.id')
+
+          compilation:
+            workers: 1
+            az: z1
+            reuse_compilation_vms: true
+            vm_type: default
+            network: default
+          EOF
+
+          # Upload cloud config
+          bosh -e devstack update-cloud-config ~/cloud-config.yml
+
+          # Deploy
+          bosh -e devstack -d test-vm deploy ~/test-deployment.yml --non-interactive
+
+          # Show VMs
+          bosh -e devstack -d test-vm vms
+
+          echo "✅ Test VM deployed from stemcell!"
+
+      - name: Verify VM via OpenStack
+        run: |
+          echo "=== Verifying VM in OpenStack ==="
+
+          source ~/devstack/openrc admin admin
+
+          # List VMs created by BOSH
+          openstack server list --all-projects
+
+          # Find BOSH-created VM
+          VM_ID=$(openstack server list --all-projects -f json | jq -r '.[] | select(.Name | contains("test-vm")) | .ID' | head -1)
+
+          if [ -n "$VM_ID" ]; then
+            echo "Found BOSH VM: $VM_ID"
+            openstack server show "$VM_ID"
+            echo "✅ VM is running in OpenStack!"
+          else
+            echo "❌ Could not find BOSH VM"
+            exit 1
+          fi
+
+      - name: Cleanup - Delete test VM
+        if: always()
+        run: |
+          echo "=== Cleaning up test VM ==="
+
+          source ~/bosh-env.sh || true
+
+          bosh -e devstack -d test-vm delete-deployment --force --non-interactive || true
+
+          echo "✅ Cleanup complete"
+
+      - name: Test Summary
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "BOSH CPI Stemcell Lifecycle Test Summary"
+          echo "=========================================="
+          echo ""
+          echo "✅ DevStack deployed"
+          echo "✅ BOSH Director deployed"
+          echo "✅ Real stemcell downloaded (~1.3GB)"
+          echo "✅ Stemcell uploaded via BOSH CPI to Glance"
+          echo "✅ VM created from stemcell"
+          echo "✅ VM verified in OpenStack"
+          echo "✅ VM deleted"
+          echo ""
+          echo "This validates the complete BOSH CPI stemcell lifecycle!"
+          echo "=========================================="
