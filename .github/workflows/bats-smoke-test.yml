@@ -669,6 +669,9 @@ jobs:
             GLANCE_STORE_PATH="/var/lib/glance/images"
           fi
 
+          # Remove trailing slash to avoid double-slash in file:// URL
+          GLANCE_STORE_PATH="${GLANCE_STORE_PATH%/}"
+
           echo "Glance filesystem store: $GLANCE_STORE_PATH"
           echo ""
 
