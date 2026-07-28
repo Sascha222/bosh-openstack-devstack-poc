@@ -699,10 +699,17 @@ jobs:
           sudo rm -f "${GLANCE_STORE_PATH}/${IMAGE_ID}" 2>/dev/null || true
           sudo rm -f "${GLANCE_STORE_PATH}/${IMAGE_ID}/"* 2>/dev/null || true
 
-          # Also clean up the malformed double-slash path from old runs
-          # This handles the case where GLANCE_STORE_PATH had a trailing slash before the fix
-          if [ -d "${GLANCE_STORE_PATH}/" ]; then
-            sudo rm -f "${GLANCE_STORE_PATH}/"*"${IMAGE_ID}" 2>/dev/null || true
+          # CRITICAL: Also remove files with double-slash from previous runs
+          # Old runs created: /opt/stack/data/glance/images//IMAGE_ID (note the //)
+          # This is the ACTUAL file that exists and blocks VM creation!
+          sudo rm -f "${GLANCE_STORE_PATH}//${IMAGE_ID}" 2>/dev/null || true
+
+          echo "Verifying cleanup..."
+          if [ -f "${GLANCE_STORE_PATH}/${IMAGE_ID}" ] || [ -f "${GLANCE_STORE_PATH}//${IMAGE_ID}" ]; then
+            echo "⚠️  WARNING: Old image file still exists after cleanup!"
+            ls -lh "${GLANCE_STORE_PATH}/"*"${IMAGE_ID}" 2>/dev/null || true
+          else
+            echo "✅ Old files cleaned up successfully"
           fi
 
           # Copy image directly to Glance's store with the image ID as filename
