@@ -94,15 +94,22 @@ Main Branch hat: Direkter OpenStack API Call (kein BOSH!)
 
 ### Phase 1: BOSH Director + Stemcell Lifecycle ⬅️ **WIR SIND HIER**
 **Branch:** `feature/bats-with-bosh-director`  
-**Status:** In Entwicklung
+**Status:** 🔧 **Debugging - Glance Config Timing Issue**
 
 **Ziele:**
 - [x] DevStack Deployment
 - [x] BOSH CLI Installation
 - [x] BOSH Director Deployment
-- [ ] Stemcell Upload via BOSH CPI testen
-- [ ] VM Lifecycle testen
+- [x] Glance Filesystem Trailing Slash Fix (KRITISCH!)
+- [x] Fix: Glance Config Reload Timing (45s wait)
+- [ ] Stemcell Upload via BOSH CPI erfolgreich validieren
+- [ ] VM Lifecycle erfolgreich testen
 - [ ] Stabilität validieren
+
+**Aktuelle Herausforderung (2026-07-28):**
+- ✅ Trailing Slash Bug identifiziert und gefixed
+- ✅ Timing-Problem erkannt: Glance braucht ~45s für vollständiges Config-Reload
+- ⏳ Nächster Test-Run sollte funktionieren
 
 **Dauer:** ~45-60 Min pro Run
 
@@ -282,6 +289,52 @@ Der Upload-Pfad muss den **BOSH CPI** nutzen, nicht direkten API Call!
 
 ---
 
+### 4. Timing und Config-Reload sind kritisch (NEU - 2026-07-28)
+
+**Das DevStack Glance Trailing Slash Problem:**
+
+**Problem:**
+```
+DevStack Config: filesystem_store_datadir = /opt/stack/data/glance/images/
+                                                                         ↑ trailing slash
+Glance baut URL: file:/// + path + / + image_id
+Ergebnis:        file:///opt/stack/data/glance/images//abc123
+                                                      ↑↑ Doppel-Slash = malformed!
+```
+
+**Lösung:**
+```bash
+# 1. Config fixen (trailing slash entfernen)
+sudo sed -i 's|^\(filesystem_store_datadir\s*=\s*.*\)/$|\1|g' /etc/glance/glance-api.conf
+
+# 2. Glance neu starten
+sudo systemctl restart devstack@g-api.service
+
+# 3. WICHTIG: Lang genug warten bis Config vollständig geladen ist!
+sleep 30
+# + 3x Verifikation mit 5s Intervallen = Gesamt ~45s
+```
+
+**Warum Timing kritisch ist:**
+1. Config-Fix muss VOR BOSH Director Deployment passieren
+2. Glance braucht 10-20s um Config NACH Restart vollständig zu laden
+3. Wenn BOSH deployed wird während Glance lädt → alte Config wird gelesen
+4. BOSH CPI schreibt falsche URL in Datenbank
+5. Nova kann Image nicht downloaden → VM ERROR
+
+**Learning:**
+✅ Services brauchen Zeit zum Config-Reload (nicht nur zum Restart!)  
+✅ Verify nach Config-Changes (nicht nur Apply)  
+✅ Timing von Fixes ist genauso wichtig wie die Fixes selbst  
+✅ URLs in Datenbank können nicht nachträglich gefixed werden
+
+**Referenz:**
+- `docs/bats-smoke-test-troubleshooting-journey.md` Problem 8
+- `docs/bosh-director-lifecycle-test-explained.md` Step 2
+- Commit: "Fix: Increase Glance config reload wait time from 15s to 45s"
+
+---
+
 ## 🚨 Für zukünftige AI-Assistenten
 
 ### Wenn du dieses Projekt übernimmst:
@@ -289,22 +342,39 @@ Der Upload-Pfad muss den **BOSH CPI** nutzen, nicht direkten API Call!
 **Lies ZUERST:**
 1. ✅ Dieses Dokument (PROJECT-OVERVIEW.md)
 2. ✅ `docs/bosh-director-lifecycle-test-explained.md`
+3. ✅ `docs/bats-smoke-test-troubleshooting-journey.md` Problem 8 (Trailing Slash)
 
 **Frage IMMER:**
 - "Was ist das EIGENTLICHE Ziel?" (Nicht: "Was steht im Code?")
 - "Wird das für BATS gebraucht?" (Nicht: "Funktioniert das?")
 - "Nutzt das den BOSH CPI?" (Nicht: "Lädt es Stemcells hoch?")
+- "Hat der Service genug Zeit für Config-Reload?" (Nicht: "Ist der Service gestartet?")
 
 **Vermeide:**
 - ❌ Filesystem-Workarounds (nicht BATS-relevant!)
 - ❌ Direkte OpenStack API Calls (BOSH CPI muss es machen!)
 - ❌ Swift in DevStack fixen (akzeptiere Filesystem Backend!)
+- ❌ Zu kurze Wait-Times nach Config-Changes (Services brauchen Zeit zum Laden!)
 
 **Fokus:**
 - ✅ BOSH Director muss laufen
 - ✅ BOSH CPI muss Upload machen
 - ✅ Standard Glance HTTP API nutzen
 - ✅ Bereite BATS vor (nicht: "teste Stemcells")
+- ✅ Config-Fixes müssen VOR dem BOSH Deployment passieren
+- ✅ Gib Services ausreichend Zeit für Config-Reload (~45s für Glance)
+
+**Wichtige DevStack-Quirks:**
+1. **Glance Trailing Slash Bug:**
+   - DevStack Config hat trailing slash in `filesystem_store_datadir`
+   - Führt zu malformed `file://` URLs (Doppel-Slash)
+   - Muss gefixed werden BEVOR BOSH Director deployed wird
+   - Glance braucht ~45s für vollständiges Config-Reload nach Restart
+
+2. **Swift Backend Issues:**
+   - Apache Proxy in DevStack hat Probleme mit >1GB Uploads
+   - 502 Bad Gateway Errors
+   - Filesystem Backend ist die zuverlässige Alternative für Tests
 
 ---
 
@@ -350,6 +420,8 @@ Der Upload-Pfad muss den **BOSH CPI** nutzen, nicht direkten API Call!
 - 🚩 "MySQL-Hack" → Nicht für BOSH CPI!
 - 🚩 "Swift fixen in DevStack" → Akzeptiere Filesystem!
 - 🚩 "Direkter OpenStack API Call" → BOSH CPI muss es machen!
+- 🚩 "Service-Restart ohne ausreichende Wait-Time" → Config-Reload braucht Zeit!
+- 🚩 "Config-Fix NACH dem Deployment" → Zu spät, URL bereits in DB!
 
 ---
 
@@ -358,20 +430,29 @@ Der Upload-Pfad muss den **BOSH CPI** nutzen, nicht direkten API Call!
 **Ziel:**
 BATS Tests in GitHub Actions laufen lassen
 
-**Aktueller Stand:**
-Feature Branch mit BOSH Director + Stemcell Lifecycle (Phase 1)
+**Aktueller Stand (2026-07-28):**
+Feature Branch mit BOSH Director + Stemcell Lifecycle (Phase 1)  
+🔧 Debugging: Glance Config Timing Issue - Fix implementiert, nächster Test-Run läuft
 
 **Nächster Schritt:**
-Test laufen lassen, dann BATS hinzufügen (Phase 3)
+Workflow-Run validieren, dann BATS hinzufügen (Phase 3)
 
-**Wichtigste Regel:**
-Der **BOSH CPI** muss den Upload machen, nicht wir direkt!
+**Wichtigste Regeln:**
+1. Der **BOSH CPI** muss den Upload machen, nicht wir direkt!
+2. Config-Fixes müssen **VOR** BOSH Director Deployment passieren!
+3. Services brauchen Zeit für Config-Reload (~45s für Glance)!
 
-**DevStack Limitation:**
-Filesystem Backend statt Swift (ist OK für BATS!)
+**DevStack Limitations:**
+- Filesystem Backend statt Swift (ist OK für BATS!)
+- Glance trailing slash Bug (wird gefixed mit 45s reload time)
+
+**Kritische Timing-Sequenz:**
+```
+Fix Glance Config → Restart → Wait 45s (Config-Reload!) → Deploy BOSH → Upload Stemcell
+```
 
 ---
 
-**Letzte Aktualisierung:** 2026-07-28  
+**Letzte Aktualisierung:** 2026-07-28 (Timing-Fix implementiert)  
 **Branch:** `feature/bats-with-bosh-director`  
-**Status:** Phase 1 in Entwicklung
+**Status:** Phase 1 - Debugging Glance Config Timing (Fix committed, testing pending)
