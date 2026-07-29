@@ -205,14 +205,23 @@ jobs:
           internal_gw: 10.0.0.1
           internal_ip: 10.0.0.6
 
+          # OpenStack CPI variables (both naming conventions for compatibility)
+          auth_url: $OS_AUTH_URL
           openstack_auth_url: $OS_AUTH_URL
+          username: $OS_USERNAME
           openstack_username: $OS_USERNAME
+          password: $OS_PASSWORD
           openstack_password: $OS_PASSWORD
+          domain: $OS_DOMAIN_NAME
           openstack_domain: $OS_DOMAIN_NAME
+          project: $OS_PROJECT_NAME
           openstack_project: $OS_PROJECT_NAME
+          region: $OS_REGION_NAME
           openstack_region: $OS_REGION_NAME
 
+          default_key_name: bosh-key
           openstack_default_key_name: bosh-key
+          default_security_groups: [default]
           openstack_default_security_groups: [default]
 
           net_id: $NETWORK_ID
