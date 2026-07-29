@@ -82,6 +82,15 @@ jobs:
           openstack flavor list
           openstack image list
 
+          echo ""
+          echo "=== Checking Nova Compute Services ==="
+          openstack compute service list
+
+          echo ""
+          echo "=== Checking Available Resources ==="
+          openstack hypervisor list
+          openstack hypervisor show $(openstack hypervisor list -f value -c ID) || true
+
           echo "✅ OpenStack is ready"
 
       - name: Fix Glance filesystem path (remove trailing slash) BEFORE BOSH
