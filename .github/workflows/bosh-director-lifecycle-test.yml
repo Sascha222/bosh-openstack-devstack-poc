@@ -263,7 +263,7 @@ jobs:
             -o ~/bosh-deployment/jumpbox-user.yml \
             -o ~/bosh-deployment/uaa.yml \
             -o ~/bosh-deployment/credhub.yml \
-            -v director_vm_type=m1.xlarge \
+            -v director_vm_type=m1.large \
             -v network_name=private
 
           echo "✅ BOSH Director deployed"
