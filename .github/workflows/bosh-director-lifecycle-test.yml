@@ -254,16 +254,14 @@ jobs:
 
           cd ~/bosh-director
 
-          # Deploy using bosh create-env
+          # Deploy using bosh create-env (minimal setup - no UAA/CredHub to save resources)
           bosh create-env ~/bosh-deployment/bosh.yml \
             --state ./state.json \
             --vars-store ./creds.yml \
             --vars-file ./director-vars.yml \
             -o ~/bosh-deployment/openstack/cpi.yml \
             -o ~/bosh-deployment/jumpbox-user.yml \
-            -o ~/bosh-deployment/uaa.yml \
-            -o ~/bosh-deployment/credhub.yml \
-            -v director_vm_type=m1.large \
+            -v director_vm_type=m1.small \
             -v network_name=private
 
           echo "✅ BOSH Director deployed"
