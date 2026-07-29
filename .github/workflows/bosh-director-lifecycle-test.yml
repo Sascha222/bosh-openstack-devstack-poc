@@ -65,7 +65,7 @@ jobs:
       - name: Verify OpenStack
         run: |
           echo "=== Verifying OpenStack Services ==="
-          source ~/devstack/openrc admin admin
+          source /opt/stack/devstack/openrc admin admin
 
           openstack endpoint list
           openstack network list
@@ -107,7 +107,7 @@ jobs:
           # Verify Glance is responding
           echo ""
           echo "Verifying Glance is ready and config is loaded..."
-          source ~/devstack/openrc admin admin
+          source /opt/stack/devstack/openrc admin admin
 
           # Multiple checks to ensure Glance is stable
           for i in {1..3}; do
@@ -153,7 +153,7 @@ jobs:
         run: |
           echo "=== Preparing BOSH Director deployment ==="
 
-          source ~/devstack/openrc admin admin
+          source /opt/stack/devstack/openrc admin admin
 
           # Create working directory
           mkdir -p ~/bosh-director
@@ -207,7 +207,7 @@ jobs:
 
       - name: Upload SSH key to OpenStack
         run: |
-          source ~/devstack/openrc admin admin
+          source /opt/stack/devstack/openrc admin admin
 
           # Delete if exists
           openstack keypair delete bosh-key 2>/dev/null || true
@@ -382,7 +382,7 @@ jobs:
         run: |
           echo "=== Verifying VM in OpenStack ==="
 
-          source ~/devstack/openrc admin admin
+          source /opt/stack/devstack/openrc admin admin
 
           # List VMs created by BOSH
           openstack server list --all-projects
