@@ -73,20 +73,17 @@ jobs:
           fi
 
           echo "Using config: $NOVA_CONF"
+          echo ""
+          echo "=== BEFORE ==="
+          sudo grep -A 10 "\[libvirt\]" "$NOVA_CONF" || true
 
-          # Add libvirt section if not exists
-          if ! sudo grep -q "\[libvirt\]" "$NOVA_CONF"; then
-            echo "" | sudo tee -a "$NOVA_CONF"
-            echo "[libvirt]" | sudo tee -a "$NOVA_CONF"
-          fi
-
-          # Set QEMU emulation mode
-          sudo sed -i '/\[libvirt\]/a virt_type = qemu' "$NOVA_CONF"
-          sudo sed -i '/\[libvirt\]/a cpu_mode = none' "$NOVA_CONF"
+          # Replace existing cpu_mode and virt_type in [libvirt] section
+          sudo sed -i 's/^cpu_mode = .*/cpu_mode = none/' "$NOVA_CONF"
+          sudo sed -i 's/^virt_type = .*/virt_type = qemu/' "$NOVA_CONF"
 
           echo ""
-          echo "=== Nova Config (libvirt section) ==="
-          sudo grep -A 5 "\[libvirt\]" "$NOVA_CONF"
+          echo "=== AFTER ==="
+          sudo grep -A 10 "\[libvirt\]" "$NOVA_CONF"
 
           # Restart Nova compute
           echo ""
@@ -94,7 +91,7 @@ jobs:
           sudo systemctl restart devstack@n-cpu.service
 
           # Wait for Nova to come back up
-          sleep 15
+          sleep 30
 
           echo "✅ Nova configured for QEMU emulation"
 
