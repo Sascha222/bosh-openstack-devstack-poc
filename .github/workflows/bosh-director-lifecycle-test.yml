@@ -59,6 +59,13 @@ jobs:
             ENABLED_SERVICES+=,c-sch,c-api,c-vol
             ENABLED_SERVICES+=,q-svc,ovn-controller,ovn-northd,q-ovn-metadata-agent
 
+            # CRITICAL: GitHub Actions runners are VMs without nested virtualization
+            # Force QEMU emulation mode so Nova can actually create VMs
+            [[post-config|$NOVA_CPU_CONF]]
+            [libvirt]
+            virt_type = qemu
+            cpu_mode = none
+
       - name: Wait for DevStack to stabilize
         run: sleep 30
 
