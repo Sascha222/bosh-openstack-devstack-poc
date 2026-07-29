@@ -89,8 +89,9 @@ with:
 
 **Warum Filesystem Backend?**
 - Swift in DevStack hat Probleme mit großen Uploads (>1GB)
-- Apache Proxy gibt 502 Bad Gateway
-- Filesystem Backend funktioniert zuverlässig
+- Apache Proxy gibt 502 Bad Gateway bei Swift Backend
+- Filesystem Backend vermeidet diese DevStack-spezifischen Bugs
+- **BOSH CPI nutzt trotzdem Standard Glance HTTP API** - kein Workaround!
 - Production nutzt Swift/Ceph (hat das Problem nicht)
 
 **Dokumentation:**
