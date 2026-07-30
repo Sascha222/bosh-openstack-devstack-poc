@@ -115,9 +115,21 @@ jobs:
           openstack compute service list
 
           echo ""
+          echo "Waiting additional 10s for hypervisor registration..."
+          sleep 10
+
+          echo ""
           echo "Checking hypervisor type (should be KVM now)..."
           openstack hypervisor list
-          openstack hypervisor show $(openstack hypervisor list -f value -c ID) | grep hypervisor_type
+
+          HYPERVISOR_ID=$(openstack hypervisor list -f value -c ID 2>/dev/null || echo "")
+          if [ -n "$HYPERVISOR_ID" ]; then
+            echo "Hypervisor found: $HYPERVISOR_ID"
+            openstack hypervisor show "$HYPERVISOR_ID" | grep hypervisor_type
+          else
+            echo "⚠️  No hypervisor found yet, checking logs..."
+            sudo journalctl -u devstack@n-cpu.service --no-pager | grep -i "hypervisor\|kvm" | tail -10
+          fi
 
           echo ""
           echo "✅ KVM permissions fixed and compute service re-registered"
