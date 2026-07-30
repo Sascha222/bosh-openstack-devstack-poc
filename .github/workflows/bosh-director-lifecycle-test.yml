@@ -334,6 +334,38 @@ jobs:
 
           echo "✅ BOSH Director deployed"
 
+      - name: Debug - Show Nova logs if deployment fails
+        if: failure()
+        run: |
+          echo "=== Nova Scheduler Logs (last 100 lines) ==="
+          sudo journalctl -u devstack@n-sch.service -n 100 --no-pager || true
+
+          echo ""
+          echo "=== Nova Compute Logs (last 100 lines) ==="
+          sudo journalctl -u devstack@n-cpu.service -n 100 --no-pager || true
+
+          echo ""
+          echo "=== Nova Conductor Logs (last 50 lines) ==="
+          sudo journalctl -u devstack@n-cond.service -n 50 --no-pager || true
+
+          echo ""
+          echo "=== Check BOSH Stemcell Image Properties ==="
+          if [ -f "./devstack/openrc" ]; then
+            source ./devstack/openrc admin admin
+          elif [ -f "/opt/stack/devstack/openrc" ]; then
+            source /opt/stack/devstack/openrc admin admin
+          fi
+
+          echo "Images in Glance:"
+          openstack image list
+
+          echo ""
+          echo "BOSH Stemcell image properties:"
+          STEMCELL_ID=$(openstack image list -f json | jq -r '.[] | select(.Name | contains("bosh-openstack-kvm")) | .ID' | head -1)
+          if [ -n "$STEMCELL_ID" ]; then
+            openstack image show "$STEMCELL_ID"
+          fi
+
       - name: Alias BOSH Director
         run: |
           echo "=== Configuring BOSH environment ==="
