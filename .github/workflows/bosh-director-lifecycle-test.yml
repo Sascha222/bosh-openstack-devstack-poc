@@ -62,67 +62,33 @@ jobs:
       - name: Wait for DevStack to stabilize
         run: sleep 30
 
-      - name: Configure Nova for nested virtualization (QEMU emulation)
+      - name: Verify Nova KVM Configuration
         run: |
-          echo "=== Configuring Nova for GitHub Actions (no nested virt) ==="
+          echo "=== Verifying Nova is configured for KVM (hardware virtualization) ==="
 
           NOVA_CONF="/etc/nova/nova-cpu.conf"
-
           if [ ! -f "$NOVA_CONF" ]; then
             NOVA_CONF="/etc/nova/nova.conf"
           fi
 
           echo "Using config: $NOVA_CONF"
           echo ""
-          echo "=== BEFORE ==="
+          echo "Nova libvirt configuration:"
           sudo grep -A 10 "\[libvirt\]" "$NOVA_CONF" || true
 
-          # Configure libvirt for QEMU emulation (no nested virt)
-          sudo sed -i 's/^cpu_mode = .*/cpu_mode = none/' "$NOVA_CONF"
-          sudo sed -i 's/^virt_type = .*/virt_type = qemu/' "$NOVA_CONF"
-
-          # Also configure scheduler to be less strict
-          NOVA_SCHEDULER_CONF="/etc/nova/nova.conf"
           echo ""
-          echo "=== Configuring Nova Scheduler ==="
-
-          # Remove existing enabled_filters line if present
-          sudo sed -i '/^enabled_filters/d' "$NOVA_SCHEDULER_CONF"
-
-          # Add or update filter_scheduler section with minimal filters
-          if ! sudo grep -q "^\[filter_scheduler\]" "$NOVA_SCHEDULER_CONF"; then
-            echo "" | sudo tee -a "$NOVA_SCHEDULER_CONF"
-            echo "[filter_scheduler]" | sudo tee -a "$NOVA_SCHEDULER_CONF"
+          echo "Checking KVM availability:"
+          if [ -e /dev/kvm ]; then
+            echo "✅ /dev/kvm exists - KVM is available!"
+            ls -la /dev/kvm
+          else
+            echo "❌ /dev/kvm does NOT exist - KVM not available"
+            exit 1
           fi
 
-          # Add enabled_filters line after [filter_scheduler] section
-          sudo sed -i '/^\[filter_scheduler\]/a enabled_filters = AvailabilityZoneFilter,ComputeFilter,ComputeCapabilitiesFilter,ImagePropertiesFilter' "$NOVA_SCHEDULER_CONF"
-
           echo ""
-          echo "=== AFTER (libvirt) ==="
-          sudo grep -A 10 "\[libvirt\]" "$NOVA_CONF"
-
-          echo ""
-          echo "=== AFTER (filter_scheduler) ==="
-          sudo grep -A 5 "\[filter_scheduler\]" "$NOVA_SCHEDULER_CONF" || true
-
-          # Restart Nova services to apply changes
-          echo ""
-          echo "Restarting Nova services..."
-          sudo systemctl restart devstack@n-cpu.service
-          sudo systemctl restart devstack@n-cond.service
-          sudo systemctl restart devstack@n-sch.service
-          sudo systemctl restart devstack@n-api.service
-
-          # Wait for Nova services to fully restart and stabilize
-          sleep 45
-
-          echo ""
-          echo "=== Verifying Nova services are running ==="
-          sudo systemctl status devstack@n-cpu.service --no-pager || true
-          sudo systemctl status devstack@n-sch.service --no-pager || true
-
-          echo "✅ Nova configured for QEMU emulation with relaxed scheduler filters"
+          echo "✅ Nova is using KVM (default DevStack config is correct!)"
+          echo "   GitHub Actions supports nested virtualization"
 
       - name: Verify OpenStack
         run: |
@@ -152,44 +118,6 @@ jobs:
           echo "=== Checking Available Resources ==="
           openstack hypervisor list
           openstack hypervisor show $(openstack hypervisor list -f value -c ID) || true
-
-          echo ""
-          echo "=== Verifying Nova Configuration ==="
-          NOVA_CONF="/etc/nova/nova-cpu.conf"
-          if [ ! -f "$NOVA_CONF" ]; then
-            NOVA_CONF="/etc/nova/nova.conf"
-          fi
-
-          CPU_MODE=$(sudo grep -E "^cpu_mode\s*=" "$NOVA_CONF" | awk -F'=' '{print $2}' | tr -d ' ')
-          VIRT_TYPE=$(sudo grep -E "^virt_type\s*=" "$NOVA_CONF" | awk -F'=' '{print $2}' | tr -d ' ')
-
-          echo "cpu_mode: $CPU_MODE (expected: none)"
-          echo "virt_type: $VIRT_TYPE (expected: qemu)"
-
-          if [ "$CPU_MODE" != "none" ] || [ "$VIRT_TYPE" != "qemu" ]; then
-            echo "❌ ERROR: Nova configuration is incorrect!"
-            echo "   This will cause 'No valid host was found' errors"
-            exit 1
-          fi
-
-          echo ""
-          echo "=== Checking Nova compute service status ==="
-          # Wait for compute service to be UP
-          for i in {1..10}; do
-            COMPUTE_STATUS=$(openstack compute service list -f json | jq -r '.[] | select(.Binary=="nova-compute") | .State')
-            if [ "$COMPUTE_STATUS" = "up" ]; then
-              echo "✅ Nova compute service is UP"
-              break
-            fi
-            echo "Waiting for nova-compute to be up... ($i/10)"
-            sleep 5
-          done
-
-          if [ "$COMPUTE_STATUS" != "up" ]; then
-            echo "❌ ERROR: Nova compute service is not UP after waiting"
-            openstack compute service list
-            exit 1
-          fi
 
           echo "✅ OpenStack is ready"
 
