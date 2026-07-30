@@ -216,8 +216,46 @@ jobs:
 
           echo ""
           echo "=== Checking Available Resources ==="
+          echo "Waiting for hypervisor to fully register (up to 60s)..."
+
+          # Wait for hypervisor to appear with timeout
+          for i in {1..12}; do
+            HYPERVISOR_COUNT=$(openstack hypervisor list -f value 2>/dev/null | wc -l)
+            if [ "$HYPERVISOR_COUNT" -gt 0 ]; then
+              echo "✅ Hypervisor registered after ${i}0 seconds"
+              break
+            fi
+            echo "  Attempt $i/12: No hypervisor yet, waiting 5s..."
+            sleep 5
+          done
+
+          echo ""
+          echo "Hypervisor list:"
           openstack hypervisor list
-          openstack hypervisor show $(openstack hypervisor list -f value -c ID) || true
+
+          HYPERVISOR_ID=$(openstack hypervisor list -f value -c ID 2>/dev/null | head -1)
+          if [ -n "$HYPERVISOR_ID" ]; then
+            echo ""
+            echo "Hypervisor details:"
+            openstack hypervisor show "$HYPERVISOR_ID"
+
+            echo ""
+            echo "Checking hypervisor type:"
+            HYPERVISOR_TYPE=$(openstack hypervisor show "$HYPERVISOR_ID" -f value -c hypervisor_type)
+            echo "Hypervisor Type: $HYPERVISOR_TYPE"
+
+            if [ "$HYPERVISOR_TYPE" = "QEMU" ]; then
+              echo "❌ ERROR: Still showing QEMU instead of KVM!"
+              exit 1
+            elif [ "$HYPERVISOR_TYPE" = "KVM" ]; then
+              echo "✅ SUCCESS: Hypervisor is KVM!"
+            else
+              echo "⚠️  WARNING: Unexpected type: $HYPERVISOR_TYPE"
+            fi
+          else
+            echo "❌ ERROR: No hypervisor found after 60s wait!"
+            exit 1
+          fi
 
           echo ""
           echo "=== Checking Placement API ==="
