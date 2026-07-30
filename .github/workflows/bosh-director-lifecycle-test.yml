@@ -289,14 +289,17 @@ jobs:
         run: |
           echo "=== Deploying BOSH Director ==="
 
-          cd ~/bosh-director
-
-          # Source OpenStack credentials
+          # Source OpenStack credentials FIRST (before cd)
           if [ -f "./devstack/openrc" ]; then
             source ./devstack/openrc admin admin
           elif [ -f "/opt/stack/devstack/openrc" ]; then
             source /opt/stack/devstack/openrc admin admin
+          else
+            echo "ERROR: openrc not found!"
+            exit 1
           fi
+
+          cd ~/bosh-director
 
           echo ""
           echo "=== Pre-deployment checks ==="
