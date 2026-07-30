@@ -77,6 +77,13 @@ jobs:
           echo "CRITICAL: Nova already registered as QEMU at Placement!"
           echo "We need to DELETE both compute service AND placement provider!"
 
+          # Source OpenStack credentials
+          if [ -f "./devstack/openrc" ]; then
+            source ./devstack/openrc admin admin
+          elif [ -f "/opt/stack/devstack/openrc" ]; then
+            source /opt/stack/devstack/openrc admin admin
+          fi
+
           echo ""
           echo "Getting compute service UUID..."
           COMPUTE_UUID=$(openstack compute service list -f json | jq -r '.[] | select(.Binary=="nova-compute") | .ID')
