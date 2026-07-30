@@ -94,7 +94,7 @@ Main Branch hat: Direkter OpenStack API Call (kein BOSH!)
 
 ### Phase 1: BOSH Director + Stemcell Lifecycle ⬅️ **WIR SIND HIER**
 **Branch:** `feature/bats-with-bosh-director`  
-**Status:** 🔧 **Debugging - Glance Config Timing Issue**
+**Status:** 🔧 **Debugging - Nova Hypervisor Registrierung**
 
 **Ziele:**
 - [x] DevStack Deployment
@@ -102,14 +102,20 @@ Main Branch hat: Direkter OpenStack API Call (kein BOSH!)
 - [x] BOSH Director Deployment
 - [x] Glance Filesystem Trailing Slash Fix (KRITISCH!)
 - [x] Fix: Glance Config Reload Timing (45s wait)
+- [x] Nova KVM Support Debugging
+- [ ] Nova Hypervisor korrekt als KVM registriert
 - [ ] Stemcell Upload via BOSH CPI erfolgreich validieren
 - [ ] VM Lifecycle erfolgreich testen
 - [ ] Stabilität validieren
 
-**Aktuelle Herausforderung (2026-07-28):**
+**Aktuelle Herausforderung (2026-07-30):**
 - ✅ Trailing Slash Bug identifiziert und gefixed
 - ✅ Timing-Problem erkannt: Glance braucht ~45s für vollständiges Config-Reload
-- ⏳ Nächster Test-Run sollte funktionieren
+- ✅ GitHub Actions Runner HABEN nested virtualization support (KVM)!
+- ✅ Nova detects KVM successfully (`<domain>kvm</domain>` in logs)
+- 🔧 Nova Hypervisor muss als KVM (nicht QEMU) bei Placement registriert werden
+- 🔧 Placement Provider muss gelöscht werden um vollständige Neu-Registrierung zu erzwingen
+- ⏳ Nächster Test-Run: Force complete re-registration mit KVM
 
 **Dauer:** ~45-60 Min pro Run
 
@@ -289,7 +295,7 @@ Der Upload-Pfad muss den **BOSH CPI** nutzen, nicht direkten API Call!
 
 ---
 
-### 4. Timing und Config-Reload sind kritisch (NEU - 2026-07-28)
+### 4. Timing und Config-Reload sind kritisch (2026-07-28)
 
 **Das DevStack Glance Trailing Slash Problem:**
 
@@ -335,6 +341,143 @@ sleep 30
 
 ---
 
+### 5. Nova Hypervisor Registration und KVM Support (2026-07-30)
+
+**Das Nova Hypervisor-Type Problem:**
+
+GitHub Actions Runner unterstützen **nested virtualization** (KVM), aber Nova muss das auch nutzen können!
+
+**Problem #1: KVM Permissions**
+```bash
+# Problem:
+ls -la /dev/kvm
+# crw-rw---- 1 root kvm ... /dev/kvm
+
+groups runner
+# runner : runner adm dialout cdrom floppy sudo audio dip video plugdev netdev docker
+
+# runner ist NICHT in kvm Gruppe!
+```
+
+**Konsequenz:**
+- Nova läuft als `runner` User
+- `runner` hat keine Permission für `/dev/kvm`
+- Libvirt fällt zurück auf QEMU Software-Emulation
+- Nova registriert sich als `hypervisor_type='QEMU'` bei Placement
+
+**Problem #2: Stemcell erwartet KVM**
+```bash
+# BOSH OpenStack Stemcells sind für KVM gebaut:
+bosh-stemcell-xxx-openstack-kvm-ubuntu-jammy-go_agent.tgz
+                              ↑↑↑
+```
+
+**Konsequenz:**
+- Nova Scheduler filter: `ImagePropertiesFilter`
+- Stemcell Properties: `hypervisor_type='kvm'` (aus Glance Metadata)
+- Nova berichtet: `hypervisor_type='QEMU'`
+- KVM ≠ QEMU → **"No valid host was found"**
+
+**Problem #3: Hypervisor Type Registration Timing**
+
+Nova registriert `hypervisor_type` beim **ERSTEN Start** bei Placement:
+```python
+# Nova Compute startup:
+if placement.has_provider(my_hostname):
+    # Provider exists → UPDATE inventory only
+    update_inventory()  # ← Ändert NICHT hypervisor_type!
+else:
+    # New provider → CREATE with all properties
+    create_provider()   # ← Setzt hypervisor_type!
+```
+
+**Konsequenz:**
+Wenn Nova ohne KVM-Zugriff startet und sich als QEMU registriert:
+- Späteres Hinzufügen zur kvm-Gruppe hilft nicht
+- Nova Restart macht nur UPDATE (nicht CREATE)
+- `hypervisor_type` bleibt QEMU
+
+**Die Lösung (3-stufig):**
+
+**Schritt 1: KVM Permissions FIX**
+```bash
+# User zur kvm-Gruppe hinzufügen
+sudo usermod -aG kvm runner
+```
+
+**Schritt 2: Placement Provider DELETE**
+```bash
+# Beide Registrierungen löschen:
+# 1. Compute Service (Nova DB)
+openstack compute service delete $COMPUTE_UUID
+
+# 2. Resource Provider (Placement DB)
+curl -X DELETE \
+  -H "X-Auth-Token: $AUTH_TOKEN" \
+  "$PLACEMENT_ENDPOINT/resource_providers/$PROVIDER_UUID"
+```
+
+**Schritt 3: Nova Restart → Fresh Registration**
+```bash
+# Nova Compute stoppen
+sudo systemctl stop devstack@n-cpu.service
+
+# Nova Compute starten (mit KVM Zugriff!)
+sudo systemctl start devstack@n-cpu.service
+
+# Nova findet KEINEN Provider bei Placement
+# → CREATE mit allen Properties
+# → hypervisor_type='KVM' wird gesetzt! ✅
+```
+
+**Warum beide Löschen kritisch ist:**
+
+Nur Compute Service löschen:
+```
+Nova startet → Checkt Placement → Findet alten Provider
+→ UPDATE (nur Inventory)
+→ hypervisor_type bleibt QEMU ❌
+```
+
+Beide löschen:
+```
+Nova startet → Checkt Placement → Findet KEINEN Provider
+→ CREATE (alles neu!)
+→ hypervisor_type='KVM' wird gesetzt ✅
+```
+
+**Verifikation:**
+```bash
+# 1. Nova detects KVM
+sudo journalctl -u devstack@n-cpu.service | grep -i kvm
+# Sollte zeigen: <domain>kvm</domain>
+
+# 2. Hypervisor erscheint in API
+openstack hypervisor list
+# Sollte einen Hypervisor zeigen
+
+# 3. Hypervisor type ist KVM
+HYPERVISOR_ID=$(openstack hypervisor list -f value -c ID)
+openstack hypervisor show "$HYPERVISOR_ID" -f value -c hypervisor_type
+# Sollte zeigen: KVM (NICHT QEMU!)
+```
+
+**Learning:**
+✅ GitHub Actions Runner UNTERSTÜTZEN nested virt - nutze es!  
+✅ User Permissions sind kritisch - `/dev/kvm` Zugriff prüfen!  
+✅ Hypervisor Type wird bei CREATION gesetzt, nicht bei UPDATE  
+✅ Placement Provider muss gelöscht werden, nicht nur Compute Service  
+✅ Match Stemcell Anforderungen mit Hypervisor Capabilities
+
+**Referenz:**
+- Commits: 
+  - "Fix: Configure Nova QEMU mode AFTER DevStack deploys" (falsche Annahme)
+  - "Fix: Force QEMU emulation mode for GitHub Actions" (falsche Annahme)
+  - "Fix: Delete Placement provider to force complete re-registration with KVM" (richtig!)
+- `docs/bosh-director-lifecycle-test-explained.md` Step 2A (wird ergänzt)
+
+---
+
 ## 🚨 Für zukünftige AI-Assistenten
 
 ### Wenn du dieses Projekt übernimmst:
@@ -371,7 +514,21 @@ sleep 30
    - Muss gefixed werden BEVOR BOSH Director deployed wird
    - Glance braucht ~45s für vollständiges Config-Reload nach Restart
 
-2. **Swift Backend Issues:**
+2. **Nova KVM Permissions:**
+   - GitHub Actions Runner HABEN nested virtualization support!
+   - DevStack startet Nova als `runner` User
+   - `runner` User ist standardmäßig NICHT in `kvm` Gruppe
+   - Ohne KVM-Zugriff fällt Libvirt auf QEMU zurück
+   - Nova registriert sich als QEMU statt KVM bei Placement
+   - BOSH Stemcells erwarten KVM → "No valid host was found"
+
+3. **Placement Provider Registration:**
+   - Hypervisor Type wird bei CREATION gesetzt, nicht bei UPDATE
+   - Nur Compute Service löschen reicht nicht (Provider bleibt)
+   - BEIDE löschen (Compute Service + Placement Provider)
+   - Dann macht Nova CREATE statt UPDATE → KVM wird korrekt registriert
+
+4. **Swift Backend Issues:**
    - Apache Proxy in DevStack hat Probleme mit >1GB Uploads
    - 502 Bad Gateway Errors
    - Filesystem Backend ist die zuverlässige Alternative für Tests
@@ -441,18 +598,26 @@ Workflow-Run validieren, dann BATS hinzufügen (Phase 3)
 1. Der **BOSH CPI** muss den Upload machen, nicht wir direkt!
 2. Config-Fixes müssen **VOR** BOSH Director Deployment passieren!
 3. Services brauchen Zeit für Config-Reload (~45s für Glance)!
+4. **Nutze KVM** auf GitHub Actions (nested virt ist verfügbar!)
+5. **Placement Provider** muss gelöscht werden, nicht nur Compute Service!
 
 **DevStack Limitations:**
 - Filesystem Backend statt Swift (ist OK für BATS!)
 - Glance trailing slash Bug (wird gefixed mit 45s reload time)
+- Nova KVM Permissions (runner User muss in kvm-Gruppe, Placement Provider muss gelöscht werden)
 
 **Kritische Timing-Sequenz:**
 ```
 Fix Glance Config → Restart → Wait 45s (Config-Reload!) → Deploy BOSH → Upload Stemcell
 ```
 
+**Kritische KVM Setup-Sequenz:**
+```
+Add runner to kvm group → Delete Placement Provider → Delete Compute Service → Restart Nova → Wait 30s → Verify KVM
+```
+
 ---
 
-**Letzte Aktualisierung:** 2026-07-28 (Timing-Fix implementiert)  
+**Letzte Aktualisierung:** 2026-07-30 (Nova KVM Permissions & Placement Provider Fix)  
 **Branch:** `feature/bats-with-bosh-director`  
-**Status:** Phase 1 - Debugging Glance Config Timing (Fix committed, testing pending)
+**Status:** Phase 1 - Debugging Nova Hypervisor Registration (Testing Placement Provider deletion)

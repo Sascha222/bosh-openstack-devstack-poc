@@ -59,6 +59,7 @@
 - Services:
   - `key` = Keystone (Auth)
   - `n-api,n-cpu,n-cond,n-sch` = Nova (Compute)
+  - `placement-api` = Placement (Resource Tracking)
   - `g-api,g-reg` = Glance (Images)
   - `c-*` = Cinder (Volumes)
   - `q-svc,ovn-*` = Neutron/OVN (Networking)
@@ -68,6 +69,181 @@
 - Glance nutzt Filesystem Backend stattdessen
 - **BOSH CPI nutzt trotzdem Standard Glance HTTP API!**
 
+**Auch wichtig:** DevStack startet Nova als `runner` User
+- Aber: `runner` ist noch NICHT in `kvm` Gruppe
+- → Nova kann `/dev/kvm` nicht nutzen
+- → Wird als QEMU registriert (falsch!)
+- → Muss später gefixed werden (Step 2A)
+
+---
+
+### Step 2A: Fix KVM Permissions BEFORE BOSH (KRITISCH!)
+
+```yaml
+- name: Fix KVM permissions for Nova Compute
+  run: |
+    echo "Adding runner user to kvm group..."
+    sudo usermod -aG kvm runner
+
+    echo "CRITICAL: Nova already registered as QEMU at Placement!"
+    echo "We need to DELETE both compute service AND placement provider!"
+
+    # Source OpenStack credentials
+    source /opt/stack/devstack/openrc admin admin
+
+    # Get UUIDs
+    COMPUTE_UUID=$(openstack compute service list -f json | jq -r '.[] | select(.Binary=="nova-compute") | .ID')
+    PROVIDER_UUID=$(openstack resource provider list -f json | jq -r '.[0].uuid')
+
+    # Delete placement provider via API
+    PLACEMENT_ENDPOINT=$(openstack endpoint list -f json | jq -r '.[] | select(.["Service Type"]=="placement") | .URL')
+    AUTH_TOKEN=$(openstack token issue -f value -c id)
+    
+    curl -X DELETE \
+      -H "X-Auth-Token: $AUTH_TOKEN" \
+      -H "OpenStack-API-Version: placement 1.36" \
+      "$PLACEMENT_ENDPOINT/resource_providers/$PROVIDER_UUID"
+
+    # Delete compute service
+    openstack compute service delete $COMPUTE_UUID
+
+    # Restart nova-compute (will re-register with KVM!)
+    sudo systemctl stop devstack@n-cpu.service
+    sleep 5
+    sudo systemctl start devstack@n-cpu.service
+
+    # Wait for complete re-registration
+    sleep 30
+```
+
+**Das Problem:**
+
+Nach DevStack Deployment ist der Zustand:
+```bash
+# KVM Device existiert
+ls -la /dev/kvm
+# crw-rw---- 1 root kvm ... /dev/kvm
+
+# Aber runner User ist NICHT in kvm Gruppe!
+groups runner
+# runner : runner adm dialout ... docker
+#          (KEIN kvm!)
+
+# Nova läuft als runner User
+ps aux | grep nova-compute
+# runner  12345  ... /usr/local/bin/nova-compute
+
+# → Nova kann /dev/kvm NICHT nutzen!
+# → Libvirt fällt zurück auf QEMU Emulation
+# → Nova registriert sich als hypervisor_type='QEMU'
+```
+
+**Warum das ein Problem ist:**
+
+BOSH Stemcells sind für KVM gebaut:
+```bash
+bosh-stemcell-xxx-openstack-kvm-ubuntu-jammy-go_agent.tgz
+                              ↑↑↑ KVM erwartet!
+```
+
+Glance Metadata nach Upload:
+```json
+{
+  "hw_machine_type": "pc",
+  "hypervisor_type": "kvm"  ← Stemcell erwartet KVM!
+}
+```
+
+Nova Scheduler Filter: `ImagePropertiesFilter`
+```python
+# Scheduler prüft:
+if image.hypervisor_type == 'kvm' and host.hypervisor_type == 'QEMU':
+    reject_host()  # KVM ≠ QEMU!
+```
+
+**Ergebnis:** "No valid host was found. There are not enough hosts available."
+
+**Die Lösung (3 Schritte):**
+
+**1. User zur kvm-Gruppe hinzufügen:**
+```bash
+sudo usermod -aG kvm runner
+```
+
+**2. BEIDE Registrierungen löschen:**
+
+Nur Compute Service löschen reicht NICHT:
+```python
+# Nova Startup:
+if placement.has_provider(my_hostname):
+    # Provider existiert → UPDATE
+    update_inventory()  # Ändert nur Inventory, NICHT hypervisor_type!
+else:
+    # Kein Provider → CREATE
+    create_provider()   # Setzt alle Properties inkl. hypervisor_type!
+```
+
+Daher BEIDE löschen:
+- **Compute Service** (Nova DB)
+- **Placement Provider** (Placement DB)
+
+```bash
+# Placement Provider löschen (via curl, kein CLI Command)
+curl -X DELETE \
+  -H "X-Auth-Token: $AUTH_TOKEN" \
+  "$PLACEMENT_ENDPOINT/resource_providers/$PROVIDER_UUID"
+
+# Compute Service löschen
+openstack compute service delete $COMPUTE_UUID
+```
+
+**3. Nova Restart → Fresh Registration:**
+```bash
+sudo systemctl stop devstack@n-cpu.service
+sleep 5
+sudo systemctl start devstack@n-cpu.service
+```
+
+**Was jetzt passiert:**
+1. Nova startet
+2. Checkt `/dev/kvm` → runner in kvm-Gruppe → Zugriff OK!
+3. Libvirt detects KVM: `<domain>kvm</domain>`
+4. Checkt Placement: KEIN Provider gefunden
+5. CREATE Provider mit `hypervisor_type='KVM'` ✅
+6. Registriert Inventory bei Placement
+7. Hypervisor erscheint in `openstack hypervisor list` mit Type KVM!
+
+**Timing:**
+- Wait 30s nach Restart für vollständige Registrierung
+- Placement braucht Zeit um Provider zu erstellen
+- Hypervisor API muss neu indexieren
+
+**Wichtig:** Dieser Fix muss VOR BOSH Director Deployment passieren!
+- BOSH deployed VMs via Nova
+- Nova Scheduler braucht KVM-Hypervisor
+- Sonst: "No valid host was found"
+
+**Verifikation in nächstem Step (Step 3):**
+```bash
+openstack hypervisor list
+openstack hypervisor show $ID -f value -c hypervisor_type
+# Muss KVM zeigen, nicht QEMU!
+```
+
+**GitHub Actions Nested Virtualization:**
+
+GitHub Actions Runner **HABEN** nested virtualization support:
+```bash
+# Inside Runner:
+egrep -c '(vmx|svm)' /proc/cpuinfo
+# > 0  → CPU hat VT-x/AMD-V Support!
+
+ls -la /dev/kvm
+# crw-rw---- 1 root kvm  ← Device existiert!
+```
+
+→ **KVM funktioniert**, nur Permissions fehlen!
+
 ---
 
 ### Step 3: OpenStack verifizieren
@@ -75,7 +251,7 @@
 ```yaml
 - name: Verify OpenStack
   run: |
-    # Try multiple possible locations for openrc
+    # Source OpenStack credentials
     if [ -f "./devstack/openrc" ]; then
       source ./devstack/openrc admin admin
     elif [ -f "/opt/stack/devstack/openrc" ]; then
@@ -84,6 +260,37 @@
     
     openstack endpoint list
     openstack network list
+    
+    # WICHTIG: Verify hypervisor is KVM (not QEMU!)
+    echo "=== Checking Hypervisor Type ==="
+    
+    # Wait for hypervisor to appear (up to 60s)
+    for i in {1..12}; do
+      HYPERVISOR_COUNT=$(openstack hypervisor list -f value 2>/dev/null | wc -l)
+      if [ "$HYPERVISOR_COUNT" -gt 0 ]; then
+        echo "✅ Hypervisor registered after ${i}0 seconds"
+        break
+      fi
+      echo "  Attempt $i/12: No hypervisor yet, waiting 5s..."
+      sleep 5
+    done
+    
+    # Get hypervisor type
+    HYPERVISOR_ID=$(openstack hypervisor list -f value -c ID 2>/dev/null | head -1)
+    if [ -n "$HYPERVISOR_ID" ]; then
+      HYPERVISOR_TYPE=$(openstack hypervisor show "$HYPERVISOR_ID" -f value -c hypervisor_type)
+      echo "Hypervisor Type: $HYPERVISOR_TYPE"
+      
+      if [ "$HYPERVISOR_TYPE" = "QEMU" ]; then
+        echo "❌ ERROR: Still showing QEMU instead of KVM!"
+        exit 1
+      elif [ "$HYPERVISOR_TYPE" = "KVM" ]; then
+        echo "✅ SUCCESS: Hypervisor is KVM!"
+      fi
+    else
+      echo "❌ ERROR: No hypervisor found after 60s wait!"
+      exit 1
+    fi
 ```
 
 **Was passiert:**
@@ -91,7 +298,27 @@
 - Pfad variiert je nach Runner: `./devstack/openrc` oder `/opt/stack/devstack/openrc`
 - **Fallback-Logik** findet den korrekten Pfad
 
-**Warum wichtig:** Ohne Credentials schlagen alle `openstack` Commands fehl
+**NEU: Hypervisor Type Verification**
+
+Nach dem KVM Permissions Fix (Step 2A) muss verifiziert werden:
+1. **Hypervisor erscheint** in `openstack hypervisor list`
+2. **Hypervisor Type ist KVM** (nicht QEMU!)
+
+**Warum wichtig:**
+- Ohne Hypervisor → Nova kann keine VMs platzieren
+- Mit QEMU statt KVM → Nova Scheduler lehnt KVM-Stemcells ab
+- Erst wenn beides stimmt kann BOSH Director VMs deployen
+
+**Wait-Loop:**
+- Hypervisor Registration braucht Zeit (~30-60s)
+- 12 Versuche à 5s = 60s Maximum
+- Early exit wenn Hypervisor früher erscheint
+
+**Error wenn:**
+- Kein Hypervisor nach 60s → Nova Compute registriert nicht
+- Hypervisor Type ist QEMU → KVM Permissions Fix hat nicht funktioniert
+
+**Ohne Credentials schlagen alle `openstack` Commands fehl**
 
 ---
 
@@ -885,8 +1112,11 @@ Nova creates VM
 ```
 DevStack Deployment
   ↓
-FIX: Configure Nova for QEMU (cpu_mode=none, virt_type=qemu)
-FIX: Configure Nova scheduler (minimal filters)
+FIX: Add runner to kvm group + Delete Placement Provider
+  ↓
+Nova Compute Restart → Registers with KVM (not QEMU!)
+  ↓
+Verify: Hypervisor Type = KVM
   ↓
 FIX: Remove trailing slash from Glance config
   ↓
@@ -900,51 +1130,204 @@ GLANCE HTTP API (PUT /v2/images/{id}/file)
   ↓
 Glance Storage (file:// URL korrekt!)
   ↓
-Nova creates VM (via QEMU)
+Nova creates VM (via KVM, matched to Stemcell requirements!)
 ```
 
 **Vorteile:**
 - ✅ Nutzt echten BOSH CPI Upload-Pfad
 - ✅ Standard Glance HTTP API
 - ✅ Nur Config-Fixes (kein API-Bypass!)
-- ✅ Nova korrekt für GitHub Actions konfiguriert (QEMU statt KVM)
-- ✅ Scheduler-Filter minimiert (verhindert Host-Rejection)
+- ✅ Nova nutzt KVM (wie in Production, matched Stemcell requirements!)
+- ✅ Hypervisor korrekt als KVM registriert (Placement Provider deletion)
 - ✅ Relevant für BATS
-- ✅ Wie in Production (nur Virtualisierung unterschiedlich)
+- ✅ Wie in Production (Virtualisierung identisch!)
 
 **Die Config-Fixes:**
-1. **Nova Libvirt:** cpu_mode=none, virt_type=qemu (QEMU statt KVM)
-2. **Nova Scheduler:** Minimal filter set (verhindert "No valid host")
-3. **Glance:** trailing slash entfernt (verhindert malformed URLs)
+1. **Nova KVM Permissions:** runner in kvm-Gruppe + Placement Provider deletion
+2. **Glance:** trailing slash entfernt (verhindert malformed URLs)
+
+**Kein QEMU mehr:**
+GitHub Actions Runner HABEN nested virtualization → Nutze KVM direkt!
 
 ---
 
-## GitHub Actions Limitations
+## GitHub Actions und KVM Support
 
-### Keine Nested Virtualization
+### Nested Virtualization ist VERFÜGBAR!
+
+**Lange geglaubt:** GitHub Actions Runner haben keine nested virtualization
+
+**Tatsache (2026-07-30):**
+```bash
+# Inside GitHub Actions Runner:
+egrep -c '(vmx|svm)' /proc/cpuinfo
+# Output: 2  → CPU hat VT-x Support!
+
+ls -la /dev/kvm
+# crw-rw---- 1 root kvm ... /dev/kvm  → Device existiert!
+
+# Test:
+sudo qemu-system-x86_64 -enable-kvm -m 128 -nographic
+# → Funktioniert! ✅
+```
+
+**GitHub Actions Runner HABEN nested virtualization support!**
+
+### Das Permission-Problem
 
 **Problem:**
-GitHub Actions Runner unterstützen keine Hardware-Virtualisierung:
+```bash
+groups runner
+# runner : runner adm dialout cdrom ... docker
+#          ↑ KEIN kvm in der Liste!
+
+ls -la /dev/kvm
+# crw-rw---- 1 root kvm ...
+#                    ↑ Nur kvm-Gruppe kann zugreifen
 ```
-Host (GitHub Runner) → VM (GitHub Actions) → OpenStack Nova → BOSH VMs
-                      ↑ Keine nested virt!
-```
+
+**Konsequenz:**
+- Nova läuft als `runner` User
+- `runner` hat keine Permission für `/dev/kvm`
+- Libvirt fällt zurück auf QEMU Emulation
+- Nova registriert sich als `hypervisor_type='QEMU'`
 
 **Lösung:**
-- Nova nutzt QEMU Emulation statt KVM
-- cpu_mode=none (keine CPU-Feature-Passthrough)
-- virt_type=qemu (Software-Emulation)
-- Minimal scheduler filters (weniger strikte Checks)
+```bash
+sudo usermod -aG kvm runner
+# → runner kann jetzt /dev/kvm nutzen
+# → Libvirt detects KVM
+# → Nova registriert sich als KVM ✅
+```
 
-**Performance:**
-- VMs laufen langsamer (Emulation)
-- Aber: Funktional identisch zu KVM
-- Ausreichend für BATS Tests
+### KVM vs. QEMU Performance
 
-**Production:**
-- Nutzt echte Hardware-Virtualisierung (KVM/ESXi)
-- Bessere Performance
-- Gleiche BOSH CPI API Calls!
+**QEMU (Software Emulation):**
+- 10-50x langsamer als nativ
+- Hohe CPU Last
+- Funktional, aber langsam
+
+**KVM (Hardware Virtualization):**
+- Near-native Performance
+- CPU VT-x/AMD-V Support
+- Wie in Production!
+
+**GitHub Actions → NUTZE KVM!**
+
+### Stemcell Requirements
+
+BOSH OpenStack Stemcells sind für KVM gebaut:
+```bash
+bosh-stemcell-*-openstack-kvm-ubuntu-jammy-go_agent.tgz
+                          ↑↑↑ KVM!
+```
+
+Glance Metadata nach Upload:
+```json
+{
+  "hw_machine_type": "pc",
+  "hypervisor_type": "kvm"
+}
+```
+
+**Nova Scheduler Filter: `ImagePropertiesFilter`**
+```python
+# Prüft ob Host-Hypervisor zu Image-Requirements passt:
+if image.hypervisor_type != host.hypervisor_type:
+    reject_host()  # KVM ≠ QEMU → No valid host!
+```
+
+**Daher:** Nova MUSS als KVM registriert sein!
+
+---
+
+## Placement Provider vs. Compute Service
+
+### Zwei getrennte Registrierungen
+
+**Nova speichert in ZWEI Orten:**
+
+1. **Nova Database: Compute Service**
+   - Service-Metadaten (up/down, enabled/disabled)
+   - Host-Info
+   - Binary: `nova-compute`
+
+2. **Placement Database: Resource Provider**
+   - Resource Inventory (CPU, RAM, Disk)
+   - Resource Allocations
+   - Traits & Custom Resource Classes
+   - **hypervisor_type** (als Placement Trait!)
+
+### Das Registration-Problem
+
+**Was Nova beim Start macht:**
+```python
+def startup():
+    # 1. Registriere bei Placement
+    if placement.has_provider(my_hostname):
+        # Provider existiert → UPDATE
+        update_inventory()  # Nur Inventory (CPU/RAM/Disk)
+                           # NICHT hypervisor_type!
+    else:
+        # Kein Provider → CREATE
+        create_provider()   # Alle Properties inkl. hypervisor_type
+    
+    # 2. Registriere Compute Service bei Nova
+    nova_db.create_or_update_service()
+```
+
+**Problem:**
+- Hypervisor Type wird nur bei **CREATE** gesetzt
+- Bei **UPDATE** wird nur Inventory aktualisiert
+- Wenn Nova mit QEMU startet → `hypervisor_type='QEMU'` in Placement
+- Späterer KVM-Fix + Restart → UPDATE (nicht CREATE)
+- `hypervisor_type` bleibt QEMU! ❌
+
+### Die Lösung: BEIDE löschen
+
+**Nur Compute Service löschen (FALSCH):**
+```bash
+openstack compute service delete $UUID
+sudo systemctl restart devstack@n-cpu.service
+```
+**Ergebnis:**
+```
+Nova startet → Checkt Placement → Provider existiert
+→ UPDATE (nur Inventory)
+→ hypervisor_type bleibt QEMU ❌
+```
+
+**BEIDE löschen (RICHTIG):**
+```bash
+# 1. Placement Provider löschen
+curl -X DELETE "$PLACEMENT_ENDPOINT/resource_providers/$UUID"
+
+# 2. Compute Service löschen
+openstack compute service delete $UUID
+
+# 3. Nova Restart
+sudo systemctl restart devstack@n-cpu.service
+```
+**Ergebnis:**
+```
+Nova startet → Checkt Placement → KEIN Provider!
+→ CREATE (alles neu!)
+→ hypervisor_type='KVM' wird gesetzt ✅
+```
+
+### Warum curl statt openstack CLI?
+
+```bash
+# Kein CLI Command für Placement Provider deletion:
+openstack resource provider delete $UUID
+# ❌ Command not found
+
+# Direkt via Placement API:
+curl -X DELETE \
+  -H "X-Auth-Token: $TOKEN" \
+  "$PLACEMENT_ENDPOINT/resource_providers/$UUID"
+# ✅ Funktioniert!
+```
 
 ---
 
