@@ -87,6 +87,25 @@ jobs:
           fi
 
           echo ""
+          echo "=== Checking libvirt connection ==="
+          echo "Nova compute user:"
+          ps aux | grep nova-compute | grep -v grep | head -1 || echo "Nova compute not running"
+
+          echo ""
+          echo "Testing libvirt connection as stack user:"
+          sudo -u stack virsh --connect qemu:///system capabilities | grep -A 5 "<guest>" | head -20 || true
+
+          echo ""
+          echo "Checking /dev/kvm permissions:"
+          ls -la /dev/kvm
+          groups stack | grep -q kvm && echo "✅ stack user is in kvm group" || echo "❌ stack user NOT in kvm group"
+
+          echo ""
+          echo "=== Checking what Nova Compute actually reports ==="
+          # This will show us what hypervisor type Nova is ACTUALLY using at runtime
+          sudo journalctl -u devstack@n-cpu.service --no-pager | grep -i "hypervisor\|virt_type\|libvirt" | tail -20 || true
+
+          echo ""
           echo "✅ Nova is using KVM (default DevStack config is correct!)"
           echo "   GitHub Actions supports nested virtualization"
 

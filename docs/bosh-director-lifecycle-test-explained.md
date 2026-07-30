@@ -1,98 +1,447 @@
-# BOSH Director Stemcell Lifecycle Test - Explained
 
-## Überblick
+# BOSH Director Stemcell Lifecycle Test - Code Walkthrough
 
-Dieser Test validiert den **kompletten BOSH CPI Stemcell Lifecycle** in DevStack:
-- BOSH Director Deployment
-- Echte Stemcell Download (~1.3GB)
-- **Stemcell Upload via BOSH CPI** (HTTP API zu Glance)
-- VM Erstellung aus Stemcell
-- VM Lifecycle Management
+## Was macht dieser Workflow?
 
-**Kritisch:** Der BOSH CPI führt den Upload durch - genau wie in Production!
+`.github/workflows/bosh-director-lifecycle-test.yml` validiert den **kompletten BOSH CPI Stemcell Lifecycle** in DevStack:
 
----
+1. Deploy DevStack (OpenStack)
+2. Fix Glance Config (DevStack Bug)
+3. Deploy BOSH Director
+4. Download echte Stemcell (~1.3GB)
+5. Upload via BOSH CPI zu Glance
+6. VM erstellen aus Stemcell
+7. VM verifizieren in OpenStack
 
-## Warum dieser Test?
-
-### Das eigentliche Ziel
-
-Wir wollen die **BATS (BOSH Acceptance Tests)** aus dem offiziellen BOSH OpenStack CPI Repository in GitHub Actions laufen lassen:
-https://github.com/cloudfoundry/bosh-openstack-cpi-release/blob/master/ci/pipeline.yml
-
-### Warum BATS?
-
-BATS validieren:
-- BOSH Director funktioniert mit OpenStack
-- BOSH CPI kann Stemcells hochladen
-- BOSH CPI kann VMs erstellen/updaten/löschen
-- BOSH CPI kann Persistent Disks managen
-- BOSH CPI kann Networking konfigurieren
-
-### Voraussetzung für BATS
-
-**BOSH Director muss laufen!**
-
-Daher ist dieser Test der **erste Schritt**:
-1. ✅ Dieser Test: BOSH Director + Stemcell Lifecycle (Basis)
-2. ⏭️ Nächster Schritt: Vollständige BATS Tests hinzufügen
+**Kritisch:** BOSH CPI führt den Upload durch - genau wie in Production!
 
 ---
 
-## Architektur
+## Code Walkthrough - Step by Step
 
-### Komponenten
-
-```
-GitHub Actions Runner (Ubuntu 24.04)
-├─ DevStack (OpenStack)
-│  ├─ Nova (Compute)
-│  ├─ Glance (Image) - Filesystem Backend
-│  ├─ Neutron (Network)
-│  └─ Cinder (Volume)
-├─ BOSH Director (deployed als VM in DevStack)
-│  ├─ BOSH CPI (OpenStack)
-│  └─ BOSH CLI
-└─ Test VM (deployed via BOSH)
-```
-
-### Data Flow
-
-```
-bosh.io
-  ↓ (download ~1.3GB)
-BOSH CLI
-  ↓ (bosh upload-stemcell)
-BOSH Director
-  ↓ (BOSH CPI)
-OpenStack Glance API (PUT /v2/images/{id}/file)
-  ↓ (HTTP Upload - KEIN Workaround!)
-Glance Storage (filesystem backend)
-  ↓
-Nova creates VM
-```
-
----
-
-## Workflow Steps im Detail
-
-### 1. DevStack Deployment
+### Step 1: System vorbereiten
 
 ```yaml
-uses: gophercloud/devstack-action@v0.19
-with:
-  branch: stable/2025.1
-  conf_overrides: |
-    ENABLED_SERVICES=mysql,rabbit,key,n-api,n-cpu,g-api,g-reg,c-api,c-vol
-    # WICHTIG: Kein Swift! (502 Bad Gateway bei großen Uploads)
+- name: Free up disk space
+  run: |
+    sudo rm -rf /usr/share/dotnet
+    sudo rm -rf /opt/ghc
+    sudo rm -rf /usr/local/lib/android
 ```
 
-**Warum Filesystem Backend?**
-- Swift in DevStack hat Probleme mit großen Uploads (>1GB)
-- Apache Proxy gibt 502 Bad Gateway bei Swift Backend
-- Filesystem Backend vermeidet diese DevStack-spezifischen Bugs
-- **BOSH CPI nutzt trotzdem Standard Glance HTTP API** - kein Workaround!
-- Production nutzt Swift/Ceph (hat das Problem nicht)
+**Warum:** GitHub Actions Runner haben ~14GB freien Speicher. Wir brauchen:
+- DevStack: ~5GB
+- BOSH Director VM: ~4GB
+- Stemcell: ~1.3GB
+- Headroom: ~3GB
+
+→ **8+ GB müssen frei gemacht werden**
+
+---
+
+### Step 2: DevStack deployen
+
+```yaml
+- name: Deploy DevStack
+  uses: gophercloud/devstack-action@v0.19
+  with:
+    branch: stable/2025.1
+    conf_overrides: |
+      ENABLED_SERVICES=mysql,rabbit,key,n-api,n-cpu,n-cond,n-sch,placement-api
+      ENABLED_SERVICES+=,g-api,g-reg
+      ENABLED_SERVICES+=,c-sch,c-api,c-vol
+      ENABLED_SERVICES+=,q-svc,ovn-controller,ovn-northd,q-ovn-metadata-agent
+```
+
+**Was passiert:**
+- `gophercloud/devstack-action` deployed OpenStack via DevStack
+- `stable/2025.1` = OpenStack Epoxy Release (aktuell)
+- Services:
+  - `key` = Keystone (Auth)
+  - `n-api,n-cpu,n-cond,n-sch` = Nova (Compute)
+  - `g-api,g-reg` = Glance (Images)
+  - `c-*` = Cinder (Volumes)
+  - `q-svc,ovn-*` = Neutron/OVN (Networking)
+
+**Wichtig:** **Kein Swift** (`s-proxy`, `s-object`...)!
+- Swift in DevStack hat Bug: 502 Bad Gateway bei großen Uploads
+- Glance nutzt Filesystem Backend stattdessen
+- **BOSH CPI nutzt trotzdem Standard Glance HTTP API!**
+
+---
+
+### Step 3: OpenStack verifizieren
+
+```yaml
+- name: Verify OpenStack
+  run: |
+    # Try multiple possible locations for openrc
+    if [ -f "./devstack/openrc" ]; then
+      source ./devstack/openrc admin admin
+    elif [ -f "/opt/stack/devstack/openrc" ]; then
+      source /opt/stack/devstack/openrc admin admin
+    fi
+    
+    openstack endpoint list
+    openstack network list
+```
+
+**Was passiert:**
+- `openrc` enthält OpenStack Credentials (OS_USERNAME, OS_PASSWORD, OS_AUTH_URL...)
+- Pfad variiert je nach Runner: `./devstack/openrc` oder `/opt/stack/devstack/openrc`
+- **Fallback-Logik** findet den korrekten Pfad
+
+**Warum wichtig:** Ohne Credentials schlagen alle `openstack` Commands fehl
+
+---
+
+### Step 4: Glance Config Fix (KRITISCH!)
+
+```yaml
+- name: Fix Glance filesystem path (remove trailing slash) BEFORE BOSH
+  run: |
+    # Remove trailing slash from Glance config
+    sudo sed -i 's|^\(filesystem_store_datadir\s*=\s*.*\)/$|\1|g' /etc/glance/glance-api.conf
+    
+    # Restart Glance to apply changes
+    sudo systemctl restart devstack@g-api.service
+    
+    # Wait for Glance to fully reload config
+    sleep 30
+```
+
+**Das Problem (DevStack Bug):**
+
+DevStack's Glance Config:
+```ini
+filesystem_store_datadir = /opt/stack/data/glance/images/
+                                                        ↑ trailing slash
+```
+
+BOSH CPI uploaded Stemcell → Glance baut URL:
+```
+file:// + /opt/stack/data/glance/images/ + / + image-id
+                                       ↑   ↑
+                                    config  separator
+= file:///opt/stack/data/glance/images//image-id
+                                      ↑↑ DOPPEL-SLASH!
+```
+
+**Was dann passiert:**
+1. Malformed URL in DB gespeichert
+2. Nova versucht Image zu downloaden
+3. Glance kann Schema nicht parsen: `Unknown scheme '' found in URI`
+4. Nova Error: `No valid host was found` → VM ERROR
+
+**Die Fix:**
+```bash
+sed -i 's|...|/$|\1|g'  # Entfernt trailing slash
+```
+
+**Nach Fix:**
+```ini
+filesystem_store_datadir = /opt/stack/data/glance/images
+```
+
+URL wird korrekt gebaut:
+```
+file:///opt/stack/data/glance/images/image-id  ✅
+```
+
+**Timing ist kritisch:**
+- `systemctl restart` startet Service neu (~3-5s)
+- **Aber:** Glance lädt Config erst ~10-20s NACH Restart!
+- `sleep 30` + 3 Checks = ~45s Wartezeit
+- Erst dann ist Glance wirklich bereit
+
+**Warum VOR BOSH Director?**
+- URL wird beim **Upload** in DB geschrieben
+- Späterer Config-Fix ändert alte DB-Einträge nicht
+- → Fix MUSS vor erstem Upload passieren!
+
+---
+
+### Step 5: BOSH CLI installieren
+
+```yaml
+- name: Install BOSH CLI
+  run: |
+    wget -O bosh https://github.com/cloudfoundry/bosh-cli/releases/download/v7.8.2/bosh-cli-7.8.2-linux-amd64
+    chmod +x bosh
+    sudo mv bosh /usr/local/bin/
+    bosh --version
+```
+
+**Was ist BOSH CLI:**
+- `bosh create-env` = Deploy BOSH Director
+- `bosh upload-stemcell` = Upload Stemcell
+- `bosh deploy` = Deploy VMs
+
+---
+
+### Step 6: BOSH Deployment Manifests laden
+
+```yaml
+- name: Download BOSH deployment manifests
+  run: |
+    git clone https://github.com/cloudfoundry/bosh-deployment.git ~/bosh-deployment
+```
+
+**Repo enthält:**
+- `bosh.yml` = BOSH Director base manifest
+- `openstack/cpi.yml` = OpenStack CPI config
+- `uaa.yml` = User authentication
+- `credhub.yml` = Credential management
+
+---
+
+### Step 7: OpenStack Variablen sammeln
+
+```yaml
+- name: Prepare BOSH Director deployment
+  run: |
+    source ./devstack/openrc admin admin
+    
+    # Get OpenStack configuration
+    export OS_AUTH_URL=$(openstack catalog show keystone -f json | jq -r '.endpoints[] | select(.interface=="public") | .url')
+    export NETWORK_ID=$(openstack network list -f json | jq -r '.[] | select(.Name=="private") | .ID')
+```
+
+**Was passiert:**
+- `openstack catalog show keystone` = Findet Keystone Auth URL
+- `openstack network list` = Findet `private` Network ID
+- Diese Werte braucht BOSH CPI um mit OpenStack zu sprechen
+
+**Variables File erstellen:**
+```yaml
+cat > director-vars.yml <<EOF
+auth_url: $OS_AUTH_URL
+username: $OS_USERNAME
+password: $OS_PASSWORD
+net_id: $NETWORK_ID
+EOF
+```
+
+**Beide Naming Conventions:**
+```yaml
+auth_url: ...           # Für ältere CPI Versionen
+openstack_auth_url: ... # Für neuere CPI Versionen
+```
+
+→ Kompatibilität mit allen BOSH CPI Versionen
+
+---
+
+### Step 8: SSH Key hochladen
+
+```yaml
+- name: Upload SSH key to OpenStack
+  run: |
+    ssh-keygen -t rsa -b 4096 -f ~/bosh-director/bosh-ssh-key -N ""
+    openstack keypair create --public-key ~/bosh-director/bosh-ssh-key.pub bosh-key
+```
+
+**Warum:** BOSH Director VM braucht SSH Key für:
+- Jumpbox User (SSH access)
+- BOSH Agent Communication
+
+---
+
+### Step 9: BOSH Director deployen
+
+```yaml
+- name: Deploy BOSH Director
+  run: |
+    bosh create-env ~/bosh-deployment/bosh.yml \
+      --state ./state.json \
+      --vars-store ./creds.yml \
+      --vars-file ./director-vars.yml \
+      -o ~/bosh-deployment/openstack/cpi.yml \
+      -o ~/bosh-deployment/jumpbox-user.yml \
+      -o ~/bosh-deployment/uaa.yml \
+      -o ~/bosh-deployment/credhub.yml \
+      -v director_vm_type=m1.large \
+      -v network_name=private
+```
+
+**Was macht `bosh create-env`:**
+1. Erstellt VM in OpenStack (m1.large: 2 vCPUs, 4GB RAM)
+2. Installiert BOSH Director auf der VM
+3. Installiert BOSH CPI (OpenStack)
+4. Konfiguriert UAA (User Auth)
+5. Konfiguriert CredHub (Credentials)
+
+**Ops-Files (`-o`):**
+- `openstack/cpi.yml` = OpenStack CPI Konfiguration
+- `jumpbox-user.yml` = SSH Zugang einrichten
+- `uaa.yml` = User Authentication & Authorization
+- `credhub.yml` = Credential Management
+
+**Variables (`-v`):**
+- `director_vm_type=m1.large` = Flavor für Director VM (war m1.xlarge, jetzt kleiner!)
+- `network_name=private` = Neutron Network
+
+**Output Files:**
+- `state.json` = VM State (für späteres `delete-env`)
+- `creds.yml` = Generated Credentials (admin_password, SSL certs...)
+
+---
+
+### Step 10: BOSH Director konfigurieren
+
+```yaml
+- name: Alias BOSH Director
+  run: |
+    export BOSH_CLIENT=admin
+    export BOSH_CLIENT_SECRET=$(bosh int ./creds.yml --path /admin_password)
+    export BOSH_ENVIRONMENT=10.0.0.6
+    
+    bosh alias-env devstack -e 10.0.0.6 --ca-cert <(bosh int ./creds.yml --path /director_ssl/ca)
+    echo "$BOSH_CLIENT_SECRET" | bosh -e devstack login
+```
+
+**Was passiert:**
+- `bosh int ./creds.yml --path /admin_password` = Liest admin Passwort aus generierten Credentials
+- `bosh alias-env devstack` = Erstellt Alias `devstack` für Director IP `10.0.0.6`
+- `bosh login` = Authentifiziert als admin User
+
+**Environment für spätere Steps speichern:**
+```bash
+cat > ~/bosh-env.sh <<EOF
+export BOSH_CLIENT=admin
+export BOSH_CLIENT_SECRET=$BOSH_CLIENT_SECRET
+export BOSH_ENVIRONMENT=10.0.0.6
+EOF
+```
+
+→ Jeder folgende Step macht `source ~/bosh-env.sh`
+
+---
+
+### Step 11: Stemcell downloaden
+
+```yaml
+- name: Download BOSH Stemcell
+  run: |
+    STEMCELL_VERSION=$(curl -s https://bosh.io/api/v1/stemcells/bosh-openstack-kvm-ubuntu-jammy-go_agent | jq -r '.[0].version')
+    STEMCELL_URL="https://storage.googleapis.com/bosh-core-stemcells/${STEMCELL_VERSION}/bosh-stemcell-${STEMCELL_VERSION}-openstack-kvm-ubuntu-jammy-go_agent.tgz"
+    wget -O ~/stemcells/stemcell.tgz "$STEMCELL_URL"
+```
+
+**Was ist eine Stemcell:**
+- Base OS Image (Ubuntu Jammy)
+- BOSH Agent vorinstalliert
+- ~1.3GB komprimiert
+- Wird zu Glance Image
+
+**API Call:**
+- `https://bosh.io/api/v1/stemcells/...` = Latest version Info
+- `https://storage.googleapis.com/bosh-core-stemcells/...` = Download URL
+
+---
+
+### Step 12: Stemcell Upload via BOSH CPI
+
+```yaml
+- name: Upload Stemcell to BOSH Director
+  run: |
+    source ~/bosh-env.sh
+    bosh -e devstack upload-stemcell ~/stemcells/stemcell.tgz
+    bosh -e devstack stemcells
+```
+
+**DAS ist der kritische Schritt!**
+
+**Was `bosh upload-stemcell` macht:**
+1. BOSH CLI sendet Stemcell zu BOSH Director
+2. BOSH Director ruft BOSH CPI auf: `create_stemcell()`
+3. **BOSH CPI macht HTTP Upload zu Glance:**
+   ```
+   PUT /v2/images/{id}/file
+   Content-Type: application/octet-stream
+   Body: <1.3GB Stemcell data>
+   ```
+4. Glance speichert Image im Filesystem Backend
+5. Glance schreibt `file://` URL in `image_locations` Tabelle
+6. BOSH CPI returned Glance Image ID
+
+**Kein Workaround:**
+- ✅ Standard Glance HTTP API
+- ✅ Wie in Production
+- ✅ Keine MySQL Manipulation
+- ✅ Kein Filesystem Copy
+
+---
+
+### Step 13: Test VM deployen
+
+```yaml
+- name: Deploy test VM from Stemcell
+  run: |
+    # Create cloud config
+    cat > ~/cloud-config.yml <<EOF
+    vm_types:
+    - name: default
+      cloud_properties:
+        instance_type: m1.small
+    EOF
+    
+    bosh -e devstack update-cloud-config ~/cloud-config.yml
+    bosh -e devstack -d test-vm deploy ~/test-deployment.yml
+```
+
+**Was passiert:**
+1. Cloud Config = OpenStack Flavor Mapping (`m1.small`)
+2. Deployment Manifest = VM Specification
+3. `bosh deploy`:
+   - Ruft BOSH CPI auf: `create_vm(stemcell_id, ...)`
+   - CPI erstellt Nova VM aus Glance Image
+   - VM bootet mit BOSH Agent
+
+**Das testet den kompletten Lifecycle:**
+- ✅ Stemcell Upload funktioniert
+- ✅ Glance Image ist nutzbar
+- ✅ Nova kann VM erstellen
+- ✅ BOSH Agent startet
+
+---
+
+### Step 14: VM verifizieren
+
+```yaml
+- name: Verify VM via OpenStack
+  run: |
+    source ./devstack/openrc admin admin
+    openstack server list --all-projects
+    VM_ID=$(openstack server list -f json | jq -r '.[] | select(.Name | contains("test-vm")) | .ID' | head -1)
+    openstack server show "$VM_ID"
+```
+
+**Verifiziert:**
+- VM existiert in OpenStack
+- VM ist ACTIVE
+- Von BOSH erstellt
+- Aus uploaded Stemcell
+
+---
+
+## Zusammenfassung
+
+**Was der Workflow NICHT macht:**
+- ❌ Keine MySQL Manipulation
+- ❌ Kein direktes Filesystem Copy
+- ❌ Keine Glance API Umgehung
+
+**Was der Workflow macht:**
+- ✅ Standard BOSH CPI Upload
+- ✅ Standard Glance HTTP API
+- ✅ Production-Ready Approach
+- ✅ Nur DevStack Config-Bugs gefixed
+
+**Der einzige "Workaround":**
+Filesystem Backend statt Swift - aber das ist eine **Backend-Wahl**, kein API-Bypass!
+
+---
 
 **Dokumentation:**
 ```
@@ -534,7 +883,10 @@ Nova creates VM
 ### Neuer Test (feature Branch):
 
 ```
-Stemcell Download
+DevStack Deployment
+  ↓
+FIX: Configure Nova for QEMU (cpu_mode=none, virt_type=qemu)
+FIX: Configure Nova scheduler (minimal filters)
   ↓
 FIX: Remove trailing slash from Glance config
   ↓
@@ -548,20 +900,51 @@ GLANCE HTTP API (PUT /v2/images/{id}/file)
   ↓
 Glance Storage (file:// URL korrekt!)
   ↓
-Nova creates VM
+Nova creates VM (via QEMU)
 ```
 
 **Vorteile:**
 - ✅ Nutzt echten BOSH CPI Upload-Pfad
 - ✅ Standard Glance HTTP API
-- ✅ Nur Config-Fix (kein API-Bypass!)
+- ✅ Nur Config-Fixes (kein API-Bypass!)
+- ✅ Nova korrekt für GitHub Actions konfiguriert (QEMU statt KVM)
+- ✅ Scheduler-Filter minimiert (verhindert Host-Rejection)
 - ✅ Relevant für BATS
-- ✅ Wie in Production
+- ✅ Wie in Production (nur Virtualisierung unterschiedlich)
 
-**Der einzige "Workaround":**
-- DevStack Config-Bug (trailing slash) wird gefixed
-- Dies ist eine **Korrektur**, kein Workaround des Upload-Pfads
-- Production OpenStack hat diesen Config-Bug nicht
+**Die Config-Fixes:**
+1. **Nova Libvirt:** cpu_mode=none, virt_type=qemu (QEMU statt KVM)
+2. **Nova Scheduler:** Minimal filter set (verhindert "No valid host")
+3. **Glance:** trailing slash entfernt (verhindert malformed URLs)
+
+---
+
+## GitHub Actions Limitations
+
+### Keine Nested Virtualization
+
+**Problem:**
+GitHub Actions Runner unterstützen keine Hardware-Virtualisierung:
+```
+Host (GitHub Runner) → VM (GitHub Actions) → OpenStack Nova → BOSH VMs
+                      ↑ Keine nested virt!
+```
+
+**Lösung:**
+- Nova nutzt QEMU Emulation statt KVM
+- cpu_mode=none (keine CPU-Feature-Passthrough)
+- virt_type=qemu (Software-Emulation)
+- Minimal scheduler filters (weniger strikte Checks)
+
+**Performance:**
+- VMs laufen langsamer (Emulation)
+- Aber: Funktional identisch zu KVM
+- Ausreichend für BATS Tests
+
+**Production:**
+- Nutzt echte Hardware-Virtualisierung (KVM/ESXi)
+- Bessere Performance
+- Gleiche BOSH CPI API Calls!
 
 ---
 
