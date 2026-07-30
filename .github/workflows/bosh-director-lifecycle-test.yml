@@ -119,6 +119,22 @@ jobs:
           openstack hypervisor list
           openstack hypervisor show $(openstack hypervisor list -f value -c ID) || true
 
+          echo ""
+          echo "=== Checking Placement API ==="
+          # Check if compute nodes are registered with Placement
+          echo "Resource providers in Placement:"
+          openstack resource provider list || echo "Failed to list resource providers"
+
+          echo ""
+          echo "Compute node inventories:"
+          PROVIDER_UUID=$(openstack resource provider list -f json | jq -r '.[0].uuid' 2>/dev/null)
+          if [ -n "$PROVIDER_UUID" ]; then
+            openstack resource provider inventory list "$PROVIDER_UUID" || echo "Failed to get inventory"
+            openstack resource provider trait list "$PROVIDER_UUID" || echo "Failed to get traits"
+          else
+            echo "No resource providers found in Placement!"
+          fi
+
           echo "✅ OpenStack is ready"
 
       - name: Fix Glance filesystem path (remove trailing slash) BEFORE BOSH
