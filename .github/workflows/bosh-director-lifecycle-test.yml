@@ -89,16 +89,25 @@ jobs:
           echo ""
           echo "=== Checking libvirt connection ==="
           echo "Nova compute user:"
-          ps aux | grep nova-compute | grep -v grep | head -1 || echo "Nova compute not running"
-
-          echo ""
-          echo "Testing libvirt connection as stack user:"
-          sudo -u stack virsh --connect qemu:///system capabilities | grep -A 5 "<guest>" | head -20 || true
+          NOVA_USER=$(ps aux | grep nova-compute | grep -v grep | awk '{print $1}' | head -1)
+          echo "Nova runs as: $NOVA_USER"
 
           echo ""
           echo "Checking /dev/kvm permissions:"
           ls -la /dev/kvm
-          groups stack | grep -q kvm && echo "✅ stack user is in kvm group" || echo "❌ stack user NOT in kvm group"
+
+          echo ""
+          echo "Checking if Nova user ($NOVA_USER) can access /dev/kvm:"
+          groups $NOVA_USER | grep -q kvm && echo "✅ $NOVA_USER is in kvm group" || echo "❌ $NOVA_USER is NOT in kvm group"
+
+          echo ""
+          echo "Testing actual access to /dev/kvm:"
+          sudo -u $NOVA_USER test -r /dev/kvm && echo "✅ $NOVA_USER CAN read /dev/kvm" || echo "❌ $NOVA_USER CANNOT read /dev/kvm"
+          sudo -u $NOVA_USER test -w /dev/kvm && echo "✅ $NOVA_USER CAN write /dev/kvm" || echo "❌ $NOVA_USER CANNOT write /dev/kvm"
+
+          echo ""
+          echo "Testing libvirt connection as Nova user:"
+          sudo -u $NOVA_USER virsh --connect qemu:///system capabilities | grep -E "<guest>|<domain type=" | head -10 || echo "Failed to connect to libvirt"
 
           echo ""
           echo "=== Checking what Nova Compute actually reports ==="
