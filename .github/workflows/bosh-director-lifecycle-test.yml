@@ -75,14 +75,7 @@ jobs:
 
           echo ""
           echo "CRITICAL: Nova already registered as QEMU at Placement!"
-          echo "We need to DELETE the compute node from Placement and let it re-register with KVM."
-
-          # Source OpenStack credentials
-          if [ -f "./devstack/openrc" ]; then
-            source ./devstack/openrc admin admin
-          elif [ -f "/opt/stack/devstack/openrc" ]; then
-            source /opt/stack/devstack/openrc admin admin
-          fi
+          echo "We need to DELETE both compute service AND placement provider!"
 
           echo ""
           echo "Getting compute service UUID..."
@@ -90,8 +83,28 @@ jobs:
           echo "Compute service UUID: $COMPUTE_UUID"
 
           echo ""
-          echo "Deleting compute service (will force re-registration)..."
-          openstack compute service delete $COMPUTE_UUID || echo "Failed to delete, continuing..."
+          echo "Getting placement provider UUID..."
+          PROVIDER_UUID=$(openstack resource provider list -f json | jq -r '.[0].uuid' 2>/dev/null)
+          echo "Placement provider UUID: $PROVIDER_UUID"
+
+          echo ""
+          echo "Deleting placement provider (this will also clean up registration)..."
+          if [ -n "$PROVIDER_UUID" ]; then
+            # Use placement API directly via curl
+            PLACEMENT_ENDPOINT=$(openstack endpoint list -f json | jq -r '.[] | select(.["Service Type"]=="placement") | .URL')
+            AUTH_TOKEN=$(openstack token issue -f value -c id)
+
+            echo "Calling: DELETE $PLACEMENT_ENDPOINT/resource_providers/$PROVIDER_UUID"
+            curl -X DELETE \
+              -H "X-Auth-Token: $AUTH_TOKEN" \
+              -H "OpenStack-API-Version: placement 1.36" \
+              "$PLACEMENT_ENDPOINT/resource_providers/$PROVIDER_UUID" \
+              -w "\nHTTP Status: %{http_code}\n" || echo "Failed to delete provider (may have allocations)"
+          fi
+
+          echo ""
+          echo "Deleting compute service..."
+          openstack compute service delete $COMPUTE_UUID || echo "Failed to delete service"
 
           echo ""
           echo "Stopping nova-compute..."
