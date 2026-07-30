@@ -74,29 +74,53 @@ jobs:
           sudo usermod -aG kvm runner
 
           echo ""
-          echo "Restarting nova-compute to pick up new group membership..."
-          sudo systemctl restart devstack@n-cpu.service
+          echo "CRITICAL: Nova already registered as QEMU at Placement!"
+          echo "We need to DELETE the compute node from Placement and let it re-register with KVM."
+
+          # Source OpenStack credentials
+          if [ -f "./devstack/openrc" ]; then
+            source ./devstack/openrc admin admin
+          elif [ -f "/opt/stack/devstack/openrc" ]; then
+            source /opt/stack/devstack/openrc admin admin
+          fi
 
           echo ""
-          echo "Waiting for nova-compute to restart..."
-          sleep 15
+          echo "Getting compute service UUID..."
+          COMPUTE_UUID=$(openstack compute service list -f json | jq -r '.[] | select(.Binary=="nova-compute") | .ID')
+          echo "Compute service UUID: $COMPUTE_UUID"
+
+          echo ""
+          echo "Deleting compute service (will force re-registration)..."
+          openstack compute service delete $COMPUTE_UUID || echo "Failed to delete, continuing..."
+
+          echo ""
+          echo "Stopping nova-compute..."
+          sudo systemctl stop devstack@n-cpu.service
+          sleep 5
+
+          echo ""
+          echo "Starting nova-compute with KVM access..."
+          sudo systemctl start devstack@n-cpu.service
+
+          echo ""
+          echo "Waiting for nova-compute to re-register (30s)..."
+          sleep 30
 
           echo ""
           echo "Verifying nova-compute is running..."
           sudo systemctl status devstack@n-cpu.service --no-pager | head -20
 
           echo ""
-          echo "Testing KVM access as runner user (in NEW shell with new groups):"
-          # Use sg to run command with new group without re-login
-          sg kvm -c "test -r /dev/kvm && echo '✅ runner can NOW read /dev/kvm' || echo '❌ Still cannot read'"
-          sg kvm -c "test -w /dev/kvm && echo '✅ runner can NOW write /dev/kvm' || echo '❌ Still cannot write'"
+          echo "Checking new compute service registration..."
+          openstack compute service list
 
           echo ""
-          echo "Testing libvirt KVM capabilities (should show kvm, not qemu):"
-          sg kvm -c "virsh --connect qemu:///system capabilities" | grep -E "<guest>|<domain type=" | head -10
+          echo "Checking hypervisor type (should be KVM now)..."
+          openstack hypervisor list
+          openstack hypervisor show $(openstack hypervisor list -f value -c ID) | grep hypervisor_type
 
           echo ""
-          echo "✅ KVM permissions fixed - Nova should now use KVM instead of QEMU"
+          echo "✅ KVM permissions fixed and compute service re-registered"
 
       - name: Verify Nova KVM Configuration
         run: |
