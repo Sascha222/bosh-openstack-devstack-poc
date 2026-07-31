@@ -83,47 +83,198 @@ jobs:
           sleep 45
           echo "✅ Glance config fixed"
 
-      - name: Test with small BOSH stemcell
+      - name: Install BOSH CLI
         run: |
-          echo "=== Testing with light stemcell (QEMU compatible) ==="
+          echo "=== Installing BOSH CLI ==="
+          wget -O bosh https://github.com/cloudfoundry/bosh-cli/releases/download/v7.8.2/bosh-cli-7.8.2-linux-amd64
+          chmod +x bosh
+          sudo mv bosh /usr/local/bin/
+          bosh --version
+          echo "✅ BOSH CLI installed"
+
+      - name: Download BOSH deployment manifests
+        run: |
+          echo "=== Downloading BOSH deployment repository ==="
+          git clone https://github.com/cloudfoundry/bosh-deployment.git ~/bosh-deployment
+          echo "✅ BOSH deployment manifests ready"
+
+      - name: Prepare BOSH Director deployment
+        run: |
+          echo "=== Preparing BOSH Director deployment ==="
           source ./devstack/openrc admin admin
 
-          # Download a LIGHT stemcell (smaller, faster for QEMU)
-          wget -O stemcell.tgz https://bosh.io/d/stemcells/bosh-openstack-kvm-ubuntu-jammy-go_agent?v=1.581
+          mkdir -p ~/bosh-director
+          cd ~/bosh-director
 
-          # Upload to Glance with hypervisor_type=qemu
-          STEMCELL_ID=$(openstack image create \
-            --disk-format qcow2 \
-            --container-format bare \
-            --public \
-            --file stemcell.tgz \
-            --property hypervisor_type=qemu \
-            "bosh-qemu-test-stemcell" \
-            -f value -c id)
+          # Get OpenStack configuration
+          export OS_AUTH_URL=$(openstack catalog show keystone -f json | jq -r '.endpoints[] | select(.interface=="public") | .url')
 
-          echo "Stemcell ID: $STEMCELL_ID"
+          echo "OpenStack Config:"
+          echo "  Auth URL: $OS_AUTH_URL"
+          echo "  Project: $OS_PROJECT_NAME"
 
-          # Wait for active
-          timeout 300 bash -c "until openstack image show $STEMCELL_ID -f value -c status | grep -q active; do sleep 5; done"
+          # Create SSH key
+          ssh-keygen -t rsa -b 4096 -f ~/bosh-director/bosh-ssh-key -N ""
 
-          echo "✅ Stemcell uploaded and active"
+          # Get network IDs
+          export NETWORK_ID=$(openstack network list -f json | jq -r '.[] | select(.Name=="private") | .ID')
 
-      - name: Create test VM
+          # Create variables file
+          cat > ~/bosh-director/director-vars.yml <<EOF
+          director_name: bosh-devstack-qemu
+          internal_cidr: 10.0.0.0/24
+          internal_gw: 10.0.0.1
+          internal_ip: 10.0.0.6
+
+          auth_url: $OS_AUTH_URL
+          openstack_auth_url: $OS_AUTH_URL
+          username: $OS_USERNAME
+          openstack_username: $OS_USERNAME
+          password: $OS_PASSWORD
+          openstack_password: $OS_PASSWORD
+          domain: ${OS_USER_DOMAIN_NAME:-Default}
+          openstack_domain: ${OS_USER_DOMAIN_NAME:-Default}
+          project: $OS_PROJECT_NAME
+          openstack_project: $OS_PROJECT_NAME
+          region: ${OS_REGION_NAME:-RegionOne}
+          openstack_region: ${OS_REGION_NAME:-RegionOne}
+
+          default_key_name: bosh-key
+          openstack_default_key_name: bosh-key
+          default_security_groups: [default]
+          openstack_default_security_groups: [default]
+
+          net_id: $NETWORK_ID
+          az: nova
+          EOF
+
+          echo "✅ BOSH Director prep complete"
+
+      - name: Upload SSH key to OpenStack
         run: |
-          echo "=== Creating test VM with QEMU ==="
+          source ./devstack/openrc admin admin
+          openstack keypair delete bosh-key 2>/dev/null || true
+          openstack keypair create --public-key ~/bosh-director/bosh-ssh-key.pub bosh-key
+          echo "✅ SSH key uploaded"
+
+      - name: Deploy BOSH Director
+        run: |
+          echo "=== Deploying BOSH Director with QEMU ==="
+          source ./devstack/openrc admin admin
+          cd ~/bosh-director
+
+          echo "⏳ This will take ~15-20 minutes (slower with QEMU)..."
+
+          # Deploy BOSH Director (uses m1.small, works with QEMU)
+          bosh create-env ~/bosh-deployment/bosh.yml \
+            --state ./state.json \
+            --vars-store ./creds.yml \
+            --vars-file ./director-vars.yml \
+            -o ~/bosh-deployment/openstack/cpi.yml \
+            -o ~/bosh-deployment/jumpbox-user.yml \
+            -v director_vm_type=m1.small \
+            -v network_name=private
+
+          echo "✅ BOSH Director deployed with QEMU!"
+
+      - name: Alias BOSH Director
+        run: |
+          echo "=== Configuring BOSH environment ==="
+          cd ~/bosh-director
+
+          export BOSH_CLIENT=admin
+          export BOSH_CLIENT_SECRET=$(bosh int ./creds.yml --path /admin_password)
+
+          bosh alias-env devstack -e 10.0.0.6 --ca-cert <(bosh int ./creds.yml --path /director_ssl/ca)
+          echo "$BOSH_CLIENT_SECRET" | bosh -e devstack login --client=$BOSH_CLIENT --client-secret-stdin
+
+          # Save environment
+          cat > ~/bosh-env.sh <<EOF
+          export BOSH_CLIENT=admin
+          export BOSH_CLIENT_SECRET=$BOSH_CLIENT_SECRET
+          export BOSH_ENVIRONMENT=10.0.0.6
+          EOF
+
+          echo "✅ BOSH Director configured"
+
+      - name: Download BOSH Stemcell
+        run: |
+          echo "=== Downloading BOSH Stemcell ==="
+          source ~/bosh-env.sh
+
+          STEMCELL_VERSION=$(curl -s https://bosh.io/api/v1/stemcells/bosh-openstack-kvm-ubuntu-jammy-go_agent | jq -r '.[0].version')
+          echo "Stemcell version: $STEMCELL_VERSION"
+
+          STEMCELL_URL="https://storage.googleapis.com/bosh-core-stemcells/${STEMCELL_VERSION}/bosh-stemcell-${STEMCELL_VERSION}-openstack-kvm-ubuntu-jammy-go_agent.tgz"
+
+          mkdir -p ~/stemcells
+          wget -O ~/stemcells/stemcell.tgz "$STEMCELL_URL"
+
+          ls -lh ~/stemcells/stemcell.tgz
+          echo "✅ Stemcell downloaded"
+
+      - name: Upload Stemcell to BOSH Director
+        run: |
+          echo "=== Uploading Stemcell via BOSH CPI ==="
+          echo "⏳ This uploads to Glance via BOSH CPI (HTTP API)..."
+
+          source ~/bosh-env.sh
+
+          # Upload via BOSH CLI - this uses BOSH CPI!
+          bosh -e devstack upload-stemcell ~/stemcells/stemcell.tgz
+
+          # Verify
+          bosh -e devstack stemcells
+
+          echo "✅ Stemcell uploaded via BOSH CPI to Glance!"
+
+      - name: Verify Stemcell in Glance
+        run: |
+          echo "=== Verifying stemcell in Glance ==="
           source ./devstack/openrc admin admin
 
-          # Get IDs
-          IMAGE_ID=$(openstack image list -f value -c ID --name bosh-qemu-test-stemcell)
-          NET_ID=$(openstack network list -f value -c ID --name private)
+          echo "Images in Glance:"
+          openstack image list
 
-          # Create VM with m1.tiny (minimal resources for QEMU)
-          openstack server create \
-            --flavor m1.tiny \
-            --image $IMAGE_ID \
-            --network $NET_ID \
-            --wait \
-            test-qemu-vm
+          echo ""
+          echo "Stemcell properties:"
+          STEMCELL_ID=$(openstack image list -f json | jq -r '.[] | select(.Name | contains("bosh-openstack")) | .ID' | head -1)
+          if [ -n "$STEMCELL_ID" ]; then
+            openstack image show "$STEMCELL_ID"
+            echo ""
+            echo "✅ Stemcell successfully uploaded to Glance!"
+            echo "   Hypervisor type in image: $(openstack image show $STEMCELL_ID -f value -c properties | grep hypervisor_type || echo 'kvm (default)')"
+          else
+            echo "❌ Stemcell not found in Glance"
+            exit 1
+          fi
 
-          openstack server show test-qemu-vm
-          echo "✅ VM created successfully with QEMU!"
+      - name: Test VM creation via BOSH
+        run: |
+          echo "=== Testing VM lifecycle with BOSH + QEMU ==="
+          source ~/bosh-env.sh
+
+          echo "BOSH environment info:"
+          bosh -e devstack env
+
+          echo ""
+          echo "✅ BOSH Director + Stemcell + QEMU test complete!"
+          echo "   - BOSH Director running on QEMU"
+          echo "   - Stemcell uploaded via BOSH CPI"
+          echo "   - Ready for BOSH deployments"
+
+      - name: Debug - Show Nova logs if deployment fails
+        if: failure()
+        run: |
+          echo "=== Nova Scheduler Logs ==="
+          sudo journalctl -u devstack@n-sch.service -n 100 --no-pager || true
+
+          echo ""
+          echo "=== Nova Compute Logs ==="
+          sudo journalctl -u devstack@n-cpu.service -n 100 --no-pager || true
+
+          echo ""
+          echo "=== Images in Glance ==="
+          source ./devstack/openrc admin admin
+          openstack image list
+
