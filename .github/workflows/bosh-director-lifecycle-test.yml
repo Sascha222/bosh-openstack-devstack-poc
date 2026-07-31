@@ -56,6 +56,7 @@ jobs:
           CPU_COUNT=$(grep -Ec '(vmx|svm)' /proc/cpuinfo)
           if [ "$CPU_COUNT" -gt 0 ]; then
             echo "✅ CPU supports virtualization (vmx/svm found in $CPU_COUNT cores)"
+            grep -E 'vmx|svm' /proc/cpuinfo | head -3
           else
             echo "❌ No vmx/svm in /proc/cpuinfo - nested virt not supported"
             exit 1
@@ -117,10 +118,82 @@ jobs:
           fi
 
           echo ""
-          echo "7. CRITICAL: Stop libvirtd if running (prevent capability caching):"
+          echo "7. Deep KVM diagnostics:"
+
+          echo ""
+          echo "7a. Test /dev/kvm with Python (direct ioctl):"
+          python3 << 'PYTHON'
+import os
+import fcntl
+try:
+    fd = os.open('/dev/kvm', os.O_RDWR | os.O_CLOEXEC)
+    print("✅ Successfully opened /dev/kvm")
+
+    # KVM_GET_API_VERSION ioctl
+    KVM_GET_API_VERSION = 0xAE00
+    try:
+        version = fcntl.ioctl(fd, KVM_GET_API_VERSION, 0)
+        print(f"✅ KVM API version: {version}")
+    except Exception as e:
+        print(f"❌ KVM ioctl failed: {e}")
+
+    os.close(fd)
+except PermissionError as e:
+    print(f"❌ Permission denied opening /dev/kvm: {e}")
+except OSError as e:
+    print(f"❌ OS Error opening /dev/kvm: {e}")
+PYTHON
+
+          echo ""
+          echo "7b. Check QEMU version and KVM support:"
+          qemu-system-x86_64 --version | head -3
+
+          echo ""
+          echo "7c. Test if QEMU can use KVM acceleration:"
+          echo "   Trying: qemu-system-x86_64 -machine accel=kvm -m 128 ..."
+          timeout 3 qemu-system-x86_64 \
+            -machine accel=kvm \
+            -m 128 \
+            -nographic \
+            -nodefaults \
+            -serial none \
+            -monitor none \
+            -display none \
+            2>&1 | head -10 || echo "   (timeout or no error = KVM works)"
+
+          echo ""
+          echo "7d. Check AppArmor status (might block QEMU/KVM):"
+          if command -v aa-status >/dev/null 2>&1; then
+            sudo aa-status --enabled && echo "⚠️  AppArmor is ENABLED" || echo "✅ AppArmor is disabled"
+            echo ""
+            echo "AppArmor profiles for libvirt/qemu:"
+            sudo aa-status 2>/dev/null | grep -E "libvirt|qemu" | head -10 || echo "   (no profiles found)"
+          else
+            echo "✅ AppArmor not installed"
+          fi
+
+          echo ""
+          echo "7e. Check SELinux status:"
+          if command -v getenforce >/dev/null 2>&1; then
+            SELINUX_STATUS=$(getenforce)
+            echo "SELinux status: $SELINUX_STATUS"
+            if [ "$SELINUX_STATUS" != "Disabled" ]; then
+              echo "⚠️  SELinux might block KVM access"
+            fi
+          else
+            echo "✅ SELinux not installed"
+          fi
+
+          echo ""
+          echo "8. CRITICAL: Stop libvirtd if running (prevent capability caching):"
           echo "   DevStack will start libvirt, and it must detect KVM on FIRST start!"
           if systemctl is-active --quiet libvirtd; then
             echo "   libvirtd is running - stopping it now"
+
+            echo ""
+            echo "   Before stopping - what does libvirt see now?"
+            sudo virsh capabilities 2>&1 | grep -E "<domain type=|<emulator>" | head -10 || true
+
             sudo systemctl stop libvirtd
             sudo systemctl stop libvirtd.socket || true
             echo "   ✅ libvirtd stopped"
