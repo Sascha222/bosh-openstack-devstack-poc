@@ -93,8 +93,9 @@ Main Branch hat: Direkter OpenStack API Call (kein BOSH!)
 ## 🚀 Roadmap
 
 ### Phase 1: BOSH Director + Stemcell Lifecycle ⬅️ **WIR SIND HIER**
-**Branch:** `feature/bats-with-bosh-director`  
-**Status:** 🔧 **Debugging - Nova Hypervisor Registrierung**
+**Branch:** `feature/bats-with-bosh-director` (KVM - nicht funktionsfähig)  
+**Branch:** `feature/bosh-qemu-test` (QEMU Alternative - in Testing)  
+**Status:** 🔧 **Blockiert - KVM funktioniert nicht auf GitHub Actions**
 
 **Ziele:**
 - [x] DevStack Deployment
@@ -102,22 +103,57 @@ Main Branch hat: Direkter OpenStack API Call (kein BOSH!)
 - [x] BOSH Director Deployment
 - [x] Glance Filesystem Trailing Slash Fix (KRITISCH!)
 - [x] Fix: Glance Config Reload Timing (45s wait)
-- [x] Nova KVM Support Debugging
-- [ ] Nova Hypervisor korrekt als KVM registriert
+- [x] Nova KVM Support Debugging (dutzende Versuche)
+- [❌] Nova Hypervisor als KVM registriert → **GESCHEITERT**
+- [🔄] QEMU Alternative: ImagePropertiesFilter deaktivieren → **IN TESTING**
 - [ ] Stemcell Upload via BOSH CPI erfolgreich validieren
 - [ ] VM Lifecycle erfolgreich testen
 - [ ] Stabilität validieren
 
-**Aktuelle Herausforderung (2026-07-30):**
-- ✅ Trailing Slash Bug identifiziert und gefixed
-- ✅ Timing-Problem erkannt: Glance braucht ~45s für vollständiges Config-Reload
-- ✅ GitHub Actions Runner HABEN nested virtualization support (KVM)!
-- ✅ Nova detects KVM successfully (`<domain>kvm</domain>` in logs)
-- 🔧 Nova Hypervisor muss als KVM (nicht QEMU) bei Placement registriert werden
-- 🔧 Placement Provider muss gelöscht werden um vollständige Neu-Registrierung zu erzwingen
-- ⏳ Nächster Test-Run: Force complete re-registration mit KVM
+**Aktuelle Situation (2026-07-31):**
 
-**Dauer:** ~45-60 Min pro Run
+**KVM Approach (gescheitert):**
+- ✅ KVM Module geladen (`kvm_amd`)
+- ✅ `/dev/kvm` mit 0666 permissions
+- ✅ runner kann `/dev/kvm` lesen/schreiben
+- ✅ Nova config: `virt_type = kvm`
+- ❌ **ABER: libvirt zeigt NUR `<domain type='qemu'/>`**
+- ❌ **Nova registriert als `hypervisor_type='QEMU'`**
+- ❌ **"No valid host was found" bei Stemcell Upload**
+
+Alle Lösungsversuche (modprobe, udev, libvirtd restart, Placement Provider delete) haben NICHT funktioniert.
+
+**QEMU Approach (aktueller Test):**
+- 🔄 Neuer Workflow: `bosh-director-qemu-test.yml`
+- 🎯 Strategie: ImagePropertiesFilter deaktivieren
+- 💡 Idee: Nova checkt hypervisor_type nicht → akzeptiert KVM-Stemcells
+- ⚠️ Risiko: Filter könnte trotzdem greifen oder hardcoded sein
+- 🐌 Performance: 10-50x langsamer als KVM (Software Emulation)
+
+**Dauer:** ~45-60 Min pro Run (KVM), ~90+ Min (QEMU erwartet)
+
+---
+
+### Phase 1b: Alternative Approaches (falls QEMU scheitert)
+**Status:** Backup-Optionen
+
+**Option A: Stemcell Metadata Manipulation**
+- Nach BOSH CPI Upload: `openstack image set --property hypervisor_type=qemu`
+- ⚠️ Hacky, nicht production-like
+- ✅ Sollte funktionieren
+
+**Option B: GitHub Actions Large Runners**
+- 💰 Kostenpflichtig
+- ❓ Unbekannt ob bessere nested virt support
+
+**Option C: Actuated.dev oder Self-hosted Runners**
+- ✅ Echtes KVM support
+- 💰 Zusätzliche Kosten/Infrastruktur
+- 🔧 Setup-Aufwand
+
+**Option D: Lokale/Staging Tests nur**
+- Akzeptieren dass BOSH CPI Tests nicht in GitHub Actions laufen
+- Tests nur auf echter Hardware mit KVM
 
 ---
 
@@ -478,6 +514,129 @@ openstack hypervisor show "$HYPERVISOR_ID" -f value -c hypervisor_type
 
 ---
 
+### 6. KVM Detection Problem und QEMU Alternative (2026-07-31)
+
+**Das fundamentale Problem:**
+
+Trotz aller Versuche KVM zum Laufen zu bringen, blieb das Problem bestehen:
+
+```bash
+✅ KVM Module geladen (kvm_amd)
+✅ /dev/kvm existiert mit permissions 0666
+✅ runner user kann /dev/kvm lesen/schreiben
+✅ Nova config: virt_type = kvm
+
+❌ ABER: libvirt zeigt NUR <domain type='qemu'/>
+❌ Nova registriert als hypervisor_type='QEMU'
+```
+
+**Alle Lösungsversuche gescheitert:**
+
+1. ✅ `modprobe kvm kvm-amd` → Module geladen
+2. ✅ udev rule MODE=0666 → Permissions OK
+3. ✅ Stop libvirtd vor DevStack → Half nicht
+4. ✅ Restart libvirtd nach udev rule → Immer noch QEMU
+5. ✅ Delete Placement Provider + Compute Service → QEMU bleibt
+
+**Warum libvirt KVM nicht erkennt - Hypothesen:**
+
+1. **GitHub Actions Runner Limitation:** Vielleicht unterstützen die Runner doch kein nested virtualization für KVM (trotz `/dev/kvm`)
+2. **Libvirt Configuration:** Tiefere Config-Probleme die wir nicht ändern können
+3. **QEMU binary:** Compiled ohne KVM support (unwahrscheinlich)
+4. **Security Layer:** AppArmor/SELinux blockiert (nicht installiert laut Checks)
+
+**Die QEMU Alternative:**
+
+Da KVM nicht funktioniert, haben wir einen parallelen Ansatz entwickelt:
+
+**Branch: `feature/bosh-qemu-test`**  
+**Workflow: `bosh-director-qemu-test.yml`**
+
+**Strategie:**
+```
+Statt KVM zu erzwingen → QEMU akzeptieren und Scheduler anpassen!
+```
+
+**Ansatz 1: ImagePropertiesFilter deaktivieren**
+```bash
+# Nova Scheduler Filter der hypervisor_type checkt
+# Wenn wir ihn aus der Filter-Liste nehmen:
+[filter_scheduler]
+enabled_filters = AvailabilityZoneFilter,ComputeFilter,ComputeCapabilitiesFilter
+# ImagePropertiesFilter FEHLT!
+
+# Dann sollte Nova den hypervisor_type NICHT mehr checken
+# und KVM-Stemcells auf QEMU-Compute akzeptieren
+```
+
+**Problem mit diesem Ansatz:**
+- ⚠️ Könnte trotzdem fehlschlagen wenn Filter hardcoded ist
+- ⚠️ Stemcell sagt immer noch "ich will KVM" in metadata
+- ⚠️ Nova Scheduler könnte das TROTZDEM checken
+
+**Ansatz 2: Stemcell Metadata überschreiben (falls nötig)**
+```bash
+# Nach BOSH CPI Upload:
+openstack image set --property hypervisor_type=qemu <stemcell-id>
+
+# Damit sagt das Stemcell "ich akzeptiere QEMU"
+# Aber: Das untergräbt die BOSH CPI Logik!
+```
+
+**Der QEMU Workflow beinhaltet:**
+
+1. DevStack deployment (QEMU by default)
+2. **ImagePropertiesFilter deaktivieren** (Haupttrick!)
+3. Glance trailing slash fix
+4. BOSH CLI installation
+5. BOSH Director deployment (m1.small, QEMU)
+6. Stemcell download (~1.3GB)
+7. **Stemcell upload via BOSH CPI** (normale KVM Stemcell!)
+8. Verifikation
+
+**Erwartetes Ergebnis:**
+
+✅ **Best Case:** Nova akzeptiert KVM-Stemcell auf QEMU-Compute  
+⚠️ **Likely Case:** "No valid host was found" - Filter greift trotzdem  
+❌ **Worst Case:** Muss Stemcell Metadata manipulieren (nicht production-like!)
+
+**Geschwindigkeit:**
+
+QEMU = Software Emulation → **10-50x langsamer** als KVM!
+- DevStack: ~25 Min (normal)
+- BOSH Director: ~30-60 Min (statt 15-20 Min)
+- VM Creation: Sehr langsam
+
+**Learning:**
+
+✅ Nicht jede Virtualisierung ist gleich verfügbar  
+✅ `/dev/kvm` existiert ≠ KVM funktioniert  
+✅ Libvirt caching ist komplex und schwer zu umgehen  
+✅ GitHub Actions Runner könnten Nested Virt Einschränkungen haben  
+✅ QEMU ist ein Fallback aber mit großen Performance-Nachteilen  
+⚠️ ImagePropertiesFilter zu umgehen ist hacky - nicht production-like  
+❌ KVM auf GitHub Actions Free Runners bleibt ungelöst (2026-07-31)
+
+**Alternative Lösungen (nicht getestet):**
+
+1. **GitHub Actions Large Runners:** Vielleicht bessere nested virt support
+2. **Actuated.dev:** Third-party CI mit echtem KVM support
+3. **Self-hosted Runners:** Auf eigener Hardware mit KVM
+4. **Akzeptieren:** BOSH Tests nur lokal/staging, nicht in GitHub Actions
+
+**Status (2026-07-31):**
+- KVM Workflow: ❌ Funktioniert nicht (Nova = QEMU trotz allem)
+- QEMU Workflow: 🔄 Erstellt, noch nicht getestet
+- Nächster Test: QEMU Workflow ausführen und schauen ob Scheduler-Trick funktioniert
+
+**Referenz:**
+- Branch: `feature/bosh-qemu-test`
+- Workflow: `bosh-director-qemu-test.yml`
+- Commits: Dutzende KVM-Fix-Versuche auf `feature/bats-with-bosh-director`
+- Community Discussion: https://github.com/orgs/community/discussions/160591
+
+---
+
 ## 🚨 Für zukünftige AI-Assistenten
 
 ### Wenn du dieses Projekt übernimmst:
@@ -587,37 +746,52 @@ openstack hypervisor show "$HYPERVISOR_ID" -f value -c hypervisor_type
 **Ziel:**
 BATS Tests in GitHub Actions laufen lassen
 
-**Aktueller Stand (2026-07-28):**
-Feature Branch mit BOSH Director + Stemcell Lifecycle (Phase 1)  
-🔧 Debugging: Glance Config Timing Issue - Fix implementiert, nächster Test-Run läuft
+**Aktueller Stand (2026-07-31):**
+- ❌ **KVM Approach gescheitert** - libvirt erkennt KVM nicht trotz aller Fixes
+- 🔄 **QEMU Alternative** in Testing - ImagePropertiesFilter deaktiviert
+- 🎯 Branch: `feature/bosh-qemu-test` 
+- ⏳ Warten auf Test-Ergebnis
 
-**Nächster Schritt:**
-Workflow-Run validieren, dann BATS hinzufügen (Phase 3)
+**Das KVM Problem:**
+```
+✅ KVM Module geladen, /dev/kvm OK, Permissions OK
+❌ ABER: libvirt zeigt nur QEMU, nicht KVM
+❌ Nova = hypervisor_type='QEMU'
+❌ Stemcells wollen 'KVM' → "No valid host was found"
+```
+
+**QEMU Workaround:**
+1. ImagePropertiesFilter aus Nova Scheduler entfernen
+2. Hoffen dass Nova KVM-Stemcells auf QEMU akzeptiert
+3. Falls nicht: Stemcell metadata manipulieren (hacky!)
 
 **Wichtigste Regeln:**
 1. Der **BOSH CPI** muss den Upload machen, nicht wir direkt!
 2. Config-Fixes müssen **VOR** BOSH Director Deployment passieren!
 3. Services brauchen Zeit für Config-Reload (~45s für Glance)!
-4. **Nutze KVM** auf GitHub Actions (nested virt ist verfügbar!)
-5. **Placement Provider** muss gelöscht werden, nicht nur Compute Service!
+4. ⚠️ **KVM funktioniert NICHT auf GitHub Actions Free Runners** (Stand 2026-07-31)
+5. **QEMU = 10-50x langsamer** aber könnte funktionieren
 
 **DevStack Limitations:**
 - Filesystem Backend statt Swift (ist OK für BATS!)
 - Glance trailing slash Bug (wird gefixed mit 45s reload time)
-- Nova KVM Permissions (runner User muss in kvm-Gruppe, Placement Provider muss gelöscht werden)
+- **KVM nested virtualization nicht nutzbar** (trotz /dev/kvm)
+- QEMU Software Emulation als Fallback (sehr langsam)
 
-**Kritische Timing-Sequenz:**
+**Kritische Sequenz (QEMU):**
 ```
-Fix Glance Config → Restart → Wait 45s (Config-Reload!) → Deploy BOSH → Upload Stemcell
+Deploy DevStack → Disable ImagePropertiesFilter → Fix Glance → Deploy BOSH → Upload Stemcell (KVM) → Hope Nova accepts it
 ```
 
-**Kritische KVM Setup-Sequenz:**
-```
-Add runner to kvm group → Delete Placement Provider → Delete Compute Service → Restart Nova → Wait 30s → Verify KVM
-```
+**Alternative Lösungen:**
+- GitHub Actions Large Runners (kostenpflichtig, vielleicht besseres KVM)
+- Actuated.dev / Self-hosted Runners (echtes KVM)
+- Stemcell Metadata manipulation (funktioniert aber hacky)
+- Akzeptieren: BOSH Tests nur lokal, nicht in CI
 
 ---
 
-**Letzte Aktualisierung:** 2026-07-30 (Nova KVM Permissions & Placement Provider Fix)  
-**Branch:** `feature/bats-with-bosh-director`  
-**Status:** Phase 1 - Debugging Nova Hypervisor Registration (Testing Placement Provider deletion)
+**Letzte Aktualisierung:** 2026-07-31 (KVM gescheitert, QEMU Alternative erstellt)  
+**Branch (KVM):** `feature/bats-with-bosh-director` - ❌ Nicht funktionsfähig  
+**Branch (QEMU):** `feature/bosh-qemu-test` - 🔄 In Testing  
+**Status:** Phase 1 - Blockiert durch KVM Problem, QEMU Workaround wird getestet
