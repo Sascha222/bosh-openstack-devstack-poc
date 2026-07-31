@@ -117,7 +117,20 @@ jobs:
           fi
 
           echo ""
+          echo "7. CRITICAL: Stop libvirtd if running (prevent capability caching):"
+          echo "   DevStack will start libvirt, and it must detect KVM on FIRST start!"
+          if systemctl is-active --quiet libvirtd; then
+            echo "   libvirtd is running - stopping it now"
+            sudo systemctl stop libvirtd
+            sudo systemctl stop libvirtd.socket || true
+            echo "   ✅ libvirtd stopped"
+          else
+            echo "   ✅ libvirtd is not running (good!)"
+          fi
+
+          echo ""
           echo "✅ KVM setup complete - ready for DevStack deployment!"
+          echo "   When DevStack starts libvirtd, it will detect KVM immediately"
 
       - name: Deploy DevStack
         id: devstack
