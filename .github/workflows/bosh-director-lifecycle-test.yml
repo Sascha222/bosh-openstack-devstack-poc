@@ -45,23 +45,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y git python3-pip python3-venv qemu-utils jq wget build-essential zlib1g-dev libssl-dev libreadline-dev libyaml-dev libsqlite3-dev sqlite3 libxml2-dev libxslt1-dev libcurl4-openssl-dev libffi-dev
 
-      - name: Deploy DevStack
-        id: devstack
-        uses: gophercloud/devstack-action@v0.19
-        with:
-          branch: stable/2025.1
-          conf_overrides: |
-            FORCE=yes
-            disable_service horizon tempest
-            # Core services - Filesystem backend (Swift causes 502 for large uploads)
-            ENABLED_SERVICES=mysql,rabbit,key,n-api,n-cpu,n-cond,n-sch,placement-api
-            ENABLED_SERVICES+=,g-api,g-reg
-            ENABLED_SERVICES+=,c-sch,c-api,c-vol
-            ENABLED_SERVICES+=,q-svc,ovn-controller,ovn-northd,q-ovn-metadata-agent
-
-      - name: Load KVM kernel modules
+      - name: Setup KVM for nested virtualization
         run: |
-          echo "=== Loading KVM kernel modules ==="
+          echo "=== Setting up KVM for nested virtualization ==="
           echo "Reference: https://github.com/orgs/community/discussions/160591"
           echo "GitHub Actions runners support nested virtualization since 2024!"
 
@@ -97,17 +83,55 @@ jobs:
           fi
 
           echo ""
-          echo "4. Check /dev/kvm exists:"
+          echo "4. /dev/kvm created by modprobe:"
+          ls -la /dev/kvm
+
+          echo ""
+          echo "5. Set /dev/kvm permissions via udev (MODE=0666):"
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+
+          # Reload udev rules and apply to /dev/kvm
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+          # Wait a bit for udev to apply
+          sleep 2
+
+          echo ""
+          echo "6. Verify /dev/kvm permissions changed:"
+          ls -la /dev/kvm
+
           if [ -c /dev/kvm ]; then
-            ls -la /dev/kvm
-            echo "✅ /dev/kvm is a character device"
+            echo "✅ /dev/kvm is accessible with MODE=0666"
+
+            # Test actual access
+            if sudo -u runner test -r /dev/kvm && sudo -u runner test -w /dev/kvm; then
+              echo "✅ runner user can read and write /dev/kvm"
+            else
+              echo "❌ runner user cannot access /dev/kvm"
+              exit 1
+            fi
           else
             echo "❌ /dev/kvm does not exist or is not a character device"
             exit 1
           fi
 
           echo ""
-          echo "✅ KVM kernel modules loaded successfully!"
+          echo "✅ KVM setup complete - ready for DevStack deployment!"
+
+      - name: Deploy DevStack
+        id: devstack
+        uses: gophercloud/devstack-action@v0.19
+        with:
+          branch: stable/2025.1
+          conf_overrides: |
+            FORCE=yes
+            disable_service horizon tempest
+            # Core services - Filesystem backend (Swift causes 502 for large uploads)
+            ENABLED_SERVICES=mysql,rabbit,key,n-api,n-cpu,n-cond,n-sch,placement-api
+            ENABLED_SERVICES+=,g-api,g-reg
+            ENABLED_SERVICES+=,c-sch,c-api,c-vol
+            ENABLED_SERVICES+=,q-svc,ovn-controller,ovn-northd,q-ovn-metadata-agent
 
       - name: Restart Libvirt and Nova Compute with KVM access
         run: |
