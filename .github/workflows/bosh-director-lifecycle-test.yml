@@ -79,9 +79,20 @@ jobs:
           echo ""
           echo "✅ KVM is now accessible to all processes!"
 
-      - name: Restart Nova Compute with KVM access
+      - name: Restart Libvirt and Nova Compute with KVM access
         run: |
-          echo "=== Restarting Nova Compute to pick up KVM access ==="
+          echo "=== Restarting Libvirt daemon to clear capabilities cache ==="
+          echo "⚠️  CRITICAL: Libvirt caches KVM availability on first check!"
+          echo "   We must restart libvirtd BEFORE Nova Compute"
+
+          # Restart libvirt daemon to pick up new /dev/kvm permissions
+          sudo systemctl restart libvirtd
+          sleep 2
+
+          # Verify libvirt now sees KVM
+          echo ""
+          echo "Testing libvirt capabilities (should show KVM now):"
+          sudo virsh capabilities | grep -E "<domain type=" | head -5
 
           # Source OpenStack credentials
           if [ -f "./devstack/openrc" ]; then
@@ -122,7 +133,7 @@ jobs:
           openstack compute service delete $COMPUTE_UUID 2>/dev/null && echo "Compute Service: Deleted ✅" || echo "Compute Service: Delete failed (continuing)"
 
           echo ""
-          echo "Starting Nova Compute with KVM access..."
+          echo "Starting Nova Compute with fresh libvirt (KVM available!)..."
           sudo systemctl start devstack@n-cpu.service
 
           echo ""
@@ -132,6 +143,10 @@ jobs:
           echo ""
           echo "Verifying Nova Compute status..."
           sudo systemctl status devstack@n-cpu.service --no-pager | head -15
+
+          echo ""
+          echo "Checking Nova logs for KVM detection..."
+          sudo journalctl -u devstack@n-cpu.service --no-pager -n 100 | grep -i "<domain>" | head -5
 
           echo ""
           echo "Checking hypervisor registration..."
@@ -146,8 +161,18 @@ jobs:
             if [ "$HYPERVISOR_TYPE" = "KVM" ]; then
               echo "✅ SUCCESS: Nova registered with KVM!"
             else
-              echo "⚠️  Still $HYPERVISOR_TYPE - checking libvirt capabilities..."
-              sudo -u runner virsh --connect qemu:///system capabilities | grep -E "<domain type=" | head -3
+              echo "❌ FAILED: Still $HYPERVISOR_TYPE"
+              echo ""
+              echo "Debugging info:"
+              echo "1. Libvirt capabilities:"
+              sudo virsh capabilities | grep -E "<domain type=" | head -5
+              echo ""
+              echo "2. /dev/kvm permissions:"
+              ls -la /dev/kvm
+              echo ""
+              echo "3. Can runner access KVM:"
+              sudo -u runner test -r /dev/kvm && echo "  ✅ Can read" || echo "  ❌ Cannot read"
+              sudo -u runner test -w /dev/kvm && echo "  ✅ Can write" || echo "  ❌ Cannot write"
             fi
           else
             echo "⚠️  No hypervisor registered yet"
