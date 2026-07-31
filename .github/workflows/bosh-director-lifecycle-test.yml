@@ -59,29 +59,29 @@ jobs:
             ENABLED_SERVICES+=,c-sch,c-api,c-vol
             ENABLED_SERVICES+=,q-svc,ovn-controller,ovn-northd,q-ovn-metadata-agent
 
-      - name: Fix KVM permissions for Nova Compute IMMEDIATELY
+      - name: Enable KVM permissions for all users
         run: |
-          echo "=== Fixing KVM permissions for Nova Compute ==="
-          echo "⚠️  CRITICAL: Must happen BEFORE Nova registers at Placement!"
-          echo ""
+          echo "=== Enabling KVM for all users via udev rules ==="
+          echo "This allows Nova (and any process) to use /dev/kvm without group membership"
 
-          echo "Current state:"
+          # Create udev rule to make /dev/kvm accessible to everyone
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+
+          # Reload udev rules and apply immediately
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+          # Verify permissions changed
+          echo ""
+          echo "New /dev/kvm permissions:"
           ls -la /dev/kvm
-          groups runner | grep -q kvm && echo "runner already in kvm group" || echo "runner NOT in kvm group"
 
           echo ""
-          echo "Step 1: Stopping nova-compute FIRST..."
-          sudo systemctl stop devstack@n-cpu.service
-          sleep 3
+          echo "✅ KVM is now accessible to all processes!"
 
-          echo ""
-          echo "Step 2: Adding runner user to kvm group..."
-          sudo usermod -aG kvm runner
-
-          echo ""
-          echo "Step 3: CRITICAL - Verify NEW group membership will work..."
-          # Test if a NEW process can see kvm group
-          sudo -u runner bash -c 'groups | grep -q kvm && echo "✅ NEW process sees kvm group" || echo "❌ NEW process does NOT see kvm group"'
+      - name: Restart Nova Compute with KVM access
+        run: |
+          echo "=== Restarting Nova Compute to pick up KVM access ==="
 
           # Source OpenStack credentials
           if [ -f "./devstack/openrc" ]; then
@@ -91,92 +91,70 @@ jobs:
           fi
 
           echo ""
-          echo "Step 4: Getting UUIDs..."
+          echo "Getting current registrations..."
           COMPUTE_UUID=$(openstack compute service list -f json | jq -r '.[] | select(.Binary=="nova-compute") | .ID')
-          echo "Compute service UUID: $COMPUTE_UUID"
-
           PROVIDER_UUID=$(openstack resource provider list -f json | jq -r '.[0].uuid' 2>/dev/null)
+
+          echo "Compute service UUID: $COMPUTE_UUID"
           echo "Placement provider UUID: $PROVIDER_UUID"
 
           echo ""
-          echo "Step 5: Deleting placement provider..."
+          echo "Stopping Nova Compute..."
+          sudo systemctl stop devstack@n-cpu.service
+          sleep 3
+
+          echo ""
+          echo "Deleting old registrations..."
+
+          # Delete Placement Provider
           if [ -n "$PROVIDER_UUID" ]; then
             PLACEMENT_ENDPOINT=$(openstack endpoint list -f json | jq -r '.[] | select(.["Service Type"]=="placement") | .URL')
             AUTH_TOKEN=$(openstack token issue -f value -c id)
 
-            echo "Calling: DELETE $PLACEMENT_ENDPOINT/resource_providers/$PROVIDER_UUID"
-            curl -X DELETE \
+            curl -s -X DELETE \
               -H "X-Auth-Token: $AUTH_TOKEN" \
               -H "OpenStack-API-Version: placement 1.36" \
               "$PLACEMENT_ENDPOINT/resource_providers/$PROVIDER_UUID" \
-              -w "\nHTTP Status: %{http_code}\n" || echo "Failed to delete provider"
+              -w "Placement Provider: HTTP %{http_code}\n"
           fi
 
-          echo ""
-          echo "Step 6: Deleting compute service..."
-          openstack compute service delete $COMPUTE_UUID && echo "✅ Compute service deleted" || echo "⚠️  Failed to delete service (continuing anyway)"
+          # Delete Compute Service
+          openstack compute service delete $COMPUTE_UUID 2>/dev/null && echo "Compute Service: Deleted ✅" || echo "Compute Service: Delete failed (continuing)"
 
           echo ""
-          echo "Step 7: FORCE Nova to start with NEW session (new group membership!)"
-          echo "Using 'sudo -u runner' to ensure NEW login session with kvm group..."
-
-          # Kill any remaining nova-compute processes
-          sudo pkill -9 -f nova-compute || true
-          sleep 2
-
-          # Start nova-compute with FRESH session that has kvm group
+          echo "Starting Nova Compute with KVM access..."
           sudo systemctl start devstack@n-cpu.service
 
           echo ""
-          echo "Step 8: Waiting for nova-compute to re-register (30s)..."
+          echo "Waiting 30s for re-registration..."
           sleep 30
 
           echo ""
-          echo "Verifying nova-compute is running..."
-          sudo systemctl status devstack@n-cpu.service --no-pager | head -20
+          echo "Verifying Nova Compute status..."
+          sudo systemctl status devstack@n-cpu.service --no-pager | head -15
 
           echo ""
-          echo "Verifying libvirt sees KVM NOW..."
-          sudo -u runner virsh --connect qemu:///system capabilities | grep -E "<domain type=" | head -5
-
-          echo ""
-          echo "Checking new compute service registration..."
-          openstack compute service list
-
-          echo ""
-          echo "Waiting additional 10s for hypervisor registration..."
-          sleep 10
-
-          echo ""
-          echo "Checking hypervisor type (should be KVM now)..."
+          echo "Checking hypervisor registration..."
           openstack hypervisor list
 
-          HYPERVISOR_ID=$(openstack hypervisor list -f value -c ID 2>/dev/null || echo "")
+          HYPERVISOR_ID=$(openstack hypervisor list -f value -c ID 2>/dev/null | head -1)
           if [ -n "$HYPERVISOR_ID" ]; then
-            echo "Hypervisor found: $HYPERVISOR_ID"
             HYPERVISOR_TYPE=$(openstack hypervisor show "$HYPERVISOR_ID" -f value -c hypervisor_type)
+            echo ""
             echo "Hypervisor Type: $HYPERVISOR_TYPE"
 
             if [ "$HYPERVISOR_TYPE" = "KVM" ]; then
               echo "✅ SUCCESS: Nova registered with KVM!"
             else
-              echo "❌ FAILED: Still $HYPERVISOR_TYPE instead of KVM!"
-              echo "Checking Nova logs for KVM detection..."
-              sudo journalctl -u devstack@n-cpu.service --no-pager | grep -i "domain>kvm" | head -5
-              echo "Checking if Nova process has kvm group..."
-              NOVA_PID=$(pgrep -f "nova-compute")
-              if [ -n "$NOVA_PID" ]; then
-                echo "Nova PID: $NOVA_PID"
-                echo "Nova process groups:"
-                cat /proc/$NOVA_PID/status | grep Groups
-              fi
+              echo "⚠️  Still $HYPERVISOR_TYPE - checking libvirt capabilities..."
+              sudo -u runner virsh --connect qemu:///system capabilities | grep -E "<domain type=" | head -3
             fi
           else
-            echo "⚠️  No hypervisor found yet!"
+            echo "⚠️  No hypervisor registered yet"
           fi
 
           echo ""
-          echo "✅ KVM permissions fix complete"
+          echo "✅ Nova Compute restart complete"
 
       - name: Verify Nova KVM Configuration
         run: |
