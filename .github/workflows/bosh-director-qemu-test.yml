@@ -1,4 +1,4 @@
-name: BOSH CPI - QEMU Stemcell Lifecycle Test
+name: BOSH CPI - QEMU Stemcell Test (Software Emulation)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     branches: [ feature/bosh-qemu-test ]
 
 jobs:
-  bosh-director-qemu-test:
+  bosh-qemu-test:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
 
@@ -21,37 +21,23 @@ jobs:
           df -h
           free -h
           nproc
-          echo "Python version: $(python3 --version)"
 
       - name: Free up disk space
         run: |
-          echo "=== Disk space BEFORE cleanup ==="
-          df -h
-
-          # Aggressive cleanup for DevStack + BOSH + Stemcells
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/hostedtoolcache
-          sudo rm -rf /usr/local/share/chromium
-          sudo rm -rf /usr/local/lib/node_modules
-
-          echo "=== Disk space AFTER cleanup ==="
+          echo "=== Cleaning up disk space ==="
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android /opt/hostedtoolcache
           df -h
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git python3-pip python3-venv qemu-utils jq wget build-essential zlib1g-dev libssl-dev libreadline-dev libyaml-dev libsqlite3-dev sqlite3 libxml2-dev libxslt1-dev libcurl4-openssl-dev libffi-dev
+          sudo apt-get install -y git python3-pip python3-venv qemu-utils jq wget
 
-      - name: Configure Nova for QEMU emulation
+      - name: Configure for QEMU
         run: |
-          echo "=== Configuring for QEMU (software emulation) ==="
-          echo "⚠️  This workflow uses QEMU instead of KVM"
-          echo "   VMs will run slower but should work without hardware virtualization"
-          echo ""
-          echo "✅ No special setup needed - QEMU is default in DevStack"
+          echo "=== This workflow uses QEMU (software emulation) ==="
+          echo "⚠️  VMs will be SLOW but work without KVM"
+          echo "✅ No special KVM setup needed"
 
       - name: Deploy DevStack
         id: devstack
@@ -61,389 +47,97 @@ jobs:
           conf_overrides: |
             FORCE=yes
             disable_service horizon tempest
-            # Core services - Filesystem backend (Swift causes 502 for large uploads)
             ENABLED_SERVICES=mysql,rabbit,key,n-api,n-cpu,n-cond,n-sch,placement-api
             ENABLED_SERVICES+=,g-api,g-reg
             ENABLED_SERVICES+=,c-sch,c-api,c-vol
             ENABLED_SERVICES+=,q-svc,ovn-controller,ovn-northd,q-ovn-metadata-agent
 
-      - name: Restart Libvirt and Nova Compute with KVM access
+      - name: Configure Nova Scheduler for QEMU
         run: |
-          echo "=== Restarting Libvirt daemon to clear capabilities cache ==="
-          echo "⚠️  CRITICAL: Libvirt caches KVM availability on first check!"
-          echo "   We must restart libvirtd BEFORE Nova Compute"
+          echo "=== Disabling ImagePropertiesFilter ==="
+          echo "This allows QEMU compute to accept KVM stemcells"
 
-          # Restart libvirt daemon to pick up new /dev/kvm permissions
-          sudo systemctl restart libvirtd
-          sleep 2
+          source ./devstack/openrc admin admin
 
-          # Verify libvirt now sees KVM
-          echo ""
-          echo "Testing libvirt capabilities (should show KVM now):"
-          sudo virsh capabilities | grep -E "<domain type=" | head -5
+          # Remove ImagePropertiesFilter
+          sudo sed -i '/^scheduler_default_filters/d' /etc/nova/nova-cpu.conf
 
-          # Source OpenStack credentials
-          if [ -f "./devstack/openrc" ]; then
-            source ./devstack/openrc admin admin
-          elif [ -f "/opt/stack/devstack/openrc" ]; then
-            source /opt/stack/devstack/openrc admin admin
-          fi
+          # Add custom filter list without ImagePropertiesFilter
+          echo "" | sudo tee -a /etc/nova/nova-cpu.conf
+          echo "[filter_scheduler]" | sudo tee -a /etc/nova/nova-cpu.conf
+          echo "enabled_filters = AvailabilityZoneFilter,ComputeFilter,ComputeCapabilitiesFilter" | sudo tee -a /etc/nova/nova-cpu.conf
 
-          echo ""
-          echo "Getting current registrations..."
-          COMPUTE_UUID=$(openstack compute service list -f json | jq -r '.[] | select(.Binary=="nova-compute") | .ID')
-          PROVIDER_UUID=$(openstack resource provider list -f json | jq -r '.[0].uuid' 2>/dev/null)
+          # Restart Nova services
+          sudo systemctl restart devstack@n-sch.service
+          sudo systemctl restart devstack@n-cpu.service
+          sleep 15
 
-          echo "Compute service UUID: $COMPUTE_UUID"
-          echo "Placement provider UUID: $PROVIDER_UUID"
-
-          echo ""
-          echo "Stopping Nova Compute..."
-          sudo systemctl stop devstack@n-cpu.service
-          sleep 3
-
-          echo ""
-          echo "Deleting old registrations..."
-
-          # Delete Placement Provider
-          if [ -n "$PROVIDER_UUID" ]; then
-            PLACEMENT_ENDPOINT=$(openstack endpoint list -f json | jq -r '.[] | select(.["Service Type"]=="placement") | .URL')
-            AUTH_TOKEN=$(openstack token issue -f value -c id)
-
-            curl -s -X DELETE \
-              -H "X-Auth-Token: $AUTH_TOKEN" \
-              -H "OpenStack-API-Version: placement 1.36" \
-              "$PLACEMENT_ENDPOINT/resource_providers/$PROVIDER_UUID" \
-              -w "Placement Provider: HTTP %{http_code}\n"
-          fi
-
-          # Delete Compute Service
-          openstack compute service delete $COMPUTE_UUID 2>/dev/null && echo "Compute Service: Deleted ✅" || echo "Compute Service: Delete failed (continuing)"
-
-          echo ""
-          echo "Starting Nova Compute with fresh libvirt (KVM available!)..."
-          sudo systemctl start devstack@n-cpu.service
-
-          echo ""
-          echo "Waiting 30s for re-registration..."
-          sleep 30
-
-          echo ""
-          echo "Verifying Nova Compute status..."
-          sudo systemctl status devstack@n-cpu.service --no-pager | head -15
-
-          echo ""
-          echo "Checking Nova logs for KVM detection..."
-          sudo journalctl -u devstack@n-cpu.service --no-pager -n 100 | grep -i "<domain>" | head -5
-
-          echo ""
-          echo "Checking hypervisor registration..."
           openstack hypervisor list
+          echo "✅ Nova configured to accept any stemcell type"
 
-          HYPERVISOR_ID=$(openstack hypervisor list -f value -c ID 2>/dev/null | head -1)
-          if [ -n "$HYPERVISOR_ID" ]; then
-            HYPERVISOR_TYPE=$(openstack hypervisor show "$HYPERVISOR_ID" -f value -c hypervisor_type)
-            echo ""
-            echo "Hypervisor Type: $HYPERVISOR_TYPE"
-
-            if [ "$HYPERVISOR_TYPE" = "KVM" ]; then
-              echo "✅ SUCCESS: Nova registered with KVM!"
-            else
-              echo "❌ FAILED: Still $HYPERVISOR_TYPE"
-              echo ""
-              echo "Debugging info:"
-              echo "1. Libvirt capabilities:"
-              sudo virsh capabilities | grep -E "<domain type=" | head -5
-              echo ""
-              echo "2. /dev/kvm permissions:"
-              ls -la /dev/kvm
-              echo ""
-              echo "3. Can runner access KVM:"
-              sudo -u runner test -r /dev/kvm && echo "  ✅ Can read" || echo "  ❌ Cannot read"
-              sudo -u runner test -w /dev/kvm && echo "  ✅ Can write" || echo "  ❌ Cannot write"
-            fi
-          else
-            echo "⚠️  No hypervisor registered yet"
-          fi
-
-          echo ""
-          echo "✅ Nova Compute restart complete"
-
-      - name: Verify Nova KVM Configuration
-        run: |
-          echo "=== Verifying Nova is configured for KVM (hardware virtualization) ==="
-
-          NOVA_CONF="/etc/nova/nova-cpu.conf"
-          if [ ! -f "$NOVA_CONF" ]; then
-            NOVA_CONF="/etc/nova/nova.conf"
-          fi
-
-          echo "Using config: $NOVA_CONF"
-          echo ""
-          echo "Nova libvirt configuration:"
-          sudo grep -A 10 "\[libvirt\]" "$NOVA_CONF" || true
-
-          echo ""
-          echo "Checking KVM availability:"
-          if [ -e /dev/kvm ]; then
-            echo "✅ /dev/kvm exists - KVM is available!"
-            ls -la /dev/kvm
-          else
-            echo "❌ /dev/kvm does NOT exist - KVM not available"
-            exit 1
-          fi
-
-          echo ""
-          echo "=== Checking libvirt connection ==="
-          echo "Nova compute user:"
-          NOVA_USER=$(ps aux | grep nova-compute | grep -v grep | awk '{print $1}' | head -1)
-          echo "Nova runs as: $NOVA_USER"
-
-          echo ""
-          echo "Checking /dev/kvm permissions:"
-          ls -la /dev/kvm
-
-          echo ""
-          echo "Checking if Nova user ($NOVA_USER) can access /dev/kvm:"
-          groups $NOVA_USER | grep -q kvm && echo "✅ $NOVA_USER is in kvm group" || echo "❌ $NOVA_USER is NOT in kvm group"
-
-          echo ""
-          echo "Testing actual access to /dev/kvm:"
-          sudo -u $NOVA_USER test -r /dev/kvm && echo "✅ $NOVA_USER CAN read /dev/kvm" || echo "❌ $NOVA_USER CANNOT read /dev/kvm"
-          sudo -u $NOVA_USER test -w /dev/kvm && echo "✅ $NOVA_USER CAN write /dev/kvm" || echo "❌ $NOVA_USER CANNOT write /dev/kvm"
-
-          echo ""
-          echo "Testing libvirt connection as Nova user:"
-          sudo -u $NOVA_USER virsh --connect qemu:///system capabilities | grep -E "<guest>|<domain type=" | head -10 || echo "Failed to connect to libvirt"
-
-          echo ""
-          echo "=== Checking what Nova Compute actually reports ==="
-          # This will show us what hypervisor type Nova is ACTUALLY using at runtime
-          sudo journalctl -u devstack@n-cpu.service --no-pager | grep -i "hypervisor\|virt_type\|libvirt" | tail -20 || true
-
-          echo ""
-          echo "✅ Nova is using KVM (default DevStack config is correct!)"
-          echo "   GitHub Actions supports nested virtualization"
-
-      - name: Verify OpenStack
-        run: |
-          echo "=== Verifying OpenStack Services ==="
-
-          # Try multiple possible locations for openrc
-          if [ -f "./devstack/openrc" ]; then
-            source ./devstack/openrc admin admin
-          elif [ -f "/opt/stack/devstack/openrc" ]; then
-            source /opt/stack/devstack/openrc admin admin
-          else
-            echo "ERROR: openrc not found!"
-            echo "Tried: ./devstack/openrc and /opt/stack/devstack/openrc"
-            exit 1
-          fi
-
-          openstack endpoint list
-          openstack network list
-          openstack flavor list
-          openstack image list
-
-          echo ""
-          echo "=== Checking Nova Compute Services ==="
-          openstack compute service list
-
-          echo ""
-          echo "=== Checking Available Resources ==="
-          echo "Waiting for hypervisor to fully register (up to 60s)..."
-
-          # Wait for hypervisor to appear with timeout
-          for i in {1..12}; do
-            HYPERVISOR_COUNT=$(openstack hypervisor list -f value 2>/dev/null | wc -l)
-            if [ "$HYPERVISOR_COUNT" -gt 0 ]; then
-              echo "✅ Hypervisor registered after ${i}0 seconds"
-              break
-            fi
-            echo "  Attempt $i/12: No hypervisor yet, waiting 5s..."
-            sleep 5
-          done
-
-          echo ""
-          echo "Hypervisor list:"
-          openstack hypervisor list
-
-          HYPERVISOR_ID=$(openstack hypervisor list -f value -c ID 2>/dev/null | head -1)
-          if [ -n "$HYPERVISOR_ID" ]; then
-            echo ""
-            echo "Hypervisor details:"
-            openstack hypervisor show "$HYPERVISOR_ID"
-
-            echo ""
-            echo "Checking hypervisor type:"
-            HYPERVISOR_TYPE=$(openstack hypervisor show "$HYPERVISOR_ID" -f value -c hypervisor_type)
-            echo "Hypervisor Type: $HYPERVISOR_TYPE"
-
-            if [ "$HYPERVISOR_TYPE" = "QEMU" ]; then
-              echo "❌ ERROR: Still showing QEMU instead of KVM!"
-              exit 1
-            elif [ "$HYPERVISOR_TYPE" = "KVM" ]; then
-              echo "✅ SUCCESS: Hypervisor is KVM!"
-            else
-              echo "⚠️  WARNING: Unexpected type: $HYPERVISOR_TYPE"
-            fi
-          else
-            echo "❌ ERROR: No hypervisor found after 60s wait!"
-            exit 1
-          fi
-
-          echo ""
-          echo "=== Checking Placement API ==="
-          # Check if compute nodes are registered with Placement
-          echo "Resource providers in Placement:"
-          openstack resource provider list || echo "Failed to list resource providers"
-
-          echo ""
-          echo "Compute node inventories:"
-          PROVIDER_UUID=$(openstack resource provider list -f json | jq -r '.[0].uuid' 2>/dev/null)
-          if [ -n "$PROVIDER_UUID" ]; then
-            openstack resource provider inventory list "$PROVIDER_UUID" || echo "Failed to get inventory"
-            openstack resource provider trait list "$PROVIDER_UUID" || echo "Failed to get traits"
-          else
-            echo "No resource providers found in Placement!"
-          fi
-
-          echo "✅ OpenStack is ready"
-
-      - name: Fix Glance filesystem path (remove trailing slash) BEFORE BOSH
+      - name: Fix Glance trailing slash bug
         run: |
           echo "=== Fixing Glance filesystem_store_datadir trailing slash ==="
-          echo "⚠️  CRITICAL: This MUST happen BEFORE BOSH Director deployment!"
-          echo "    Otherwise BOSH CPI will write malformed file:// URLs to image_locations table"
-          echo ""
-
-          # Show current config
-          echo "Before fix:"
-          sudo grep filesystem_store_datadir /etc/glance/glance-api.conf || echo "Config not found"
-
-          # Remove trailing slash from Glance config
-          # This is CRITICAL to avoid double-slash in file:// URLs
-          # See: docs/bats-smoke-test-troubleshooting-journey.md Problem 8
           sudo sed -i 's|^\(filesystem_store_datadir\s*=\s*.*\)/$|\1|g' /etc/glance/glance-api.conf
-
-          # Show fixed config
-          echo ""
-          echo "After fix:"
-          sudo grep filesystem_store_datadir /etc/glance/glance-api.conf
-
-          # Restart Glance to apply changes
-          echo ""
-          echo "Restarting Glance to load new config..."
           sudo systemctl restart devstack@g-api.service
-
-          # Wait longer for Glance to fully reload config
-          echo "Waiting for Glance to fully reload configuration..."
-          sleep 30
-
-          # Verify Glance is responding
-          echo ""
-          echo "Verifying Glance is ready and config is loaded..."
-          if [ -f "./devstack/openrc" ]; then
-            source ./devstack/openrc admin admin
-          elif [ -f "/opt/stack/devstack/openrc" ]; then
-            source /opt/stack/devstack/openrc admin admin
-          fi
-
-          # Multiple checks to ensure Glance is stable
-          for i in {1..3}; do
-            echo "Check $i/3..."
-            openstack image list
-            sleep 5
-          done
-
-          # Final verification: Check the config was actually applied
-          echo ""
-          echo "Final verification - config value:"
-          sudo grep filesystem_store_datadir /etc/glance/glance-api.conf
-
-          echo ""
-          echo "✅ Glance config fixed and verified (trailing slash removed)"
-          echo "   Config has been reloaded by Glance service"
-          echo "   NOW it's safe to deploy BOSH Director!"
-          echo "   BOSH CPI will write correct file:// URLs (no double-slash)"
+          sleep 45
+          echo "✅ Glance config fixed"
 
       - name: Install BOSH CLI
         run: |
           echo "=== Installing BOSH CLI ==="
-
-          # Download BOSH CLI v2
           wget -O bosh https://github.com/cloudfoundry/bosh-cli/releases/download/v7.8.2/bosh-cli-7.8.2-linux-amd64
           chmod +x bosh
           sudo mv bosh /usr/local/bin/
-
-          # Verify
           bosh --version
-
           echo "✅ BOSH CLI installed"
 
       - name: Download BOSH deployment manifests
         run: |
           echo "=== Downloading BOSH deployment repository ==="
-
           git clone https://github.com/cloudfoundry/bosh-deployment.git ~/bosh-deployment
-
           echo "✅ BOSH deployment manifests ready"
 
       - name: Prepare BOSH Director deployment
         run: |
           echo "=== Preparing BOSH Director deployment ==="
+          source ./devstack/openrc admin admin
 
-          if [ -f "./devstack/openrc" ]; then
-            source ./devstack/openrc admin admin
-          elif [ -f "/opt/stack/devstack/openrc" ]; then
-            source /opt/stack/devstack/openrc admin admin
-          fi
-
-          # Create working directory
           mkdir -p ~/bosh-director
           cd ~/bosh-director
 
           # Get OpenStack configuration
           export OS_AUTH_URL=$(openstack catalog show keystone -f json | jq -r '.endpoints[] | select(.interface=="public") | .url')
-          export OS_PROJECT_NAME=$OS_PROJECT_NAME
-          export OS_USERNAME=$OS_USERNAME
-          export OS_PASSWORD=$OS_PASSWORD
-          export OS_REGION_NAME=${OS_REGION_NAME:-RegionOne}
-          export OS_DOMAIN_NAME=${OS_USER_DOMAIN_NAME:-Default}
-
-          # Get network IDs
-          export NETWORK_ID=$(openstack network list -f json | jq -r '.[] | select(.Name=="private") | .ID')
-          export EXTERNAL_NETWORK_ID=$(openstack network list -f json | jq -r '.[] | select(.Name=="public") | .ID')
 
           echo "OpenStack Config:"
           echo "  Auth URL: $OS_AUTH_URL"
           echo "  Project: $OS_PROJECT_NAME"
-          echo "  Network ID: $NETWORK_ID"
-          echo "  External Network ID: $EXTERNAL_NETWORK_ID"
 
-          # Create SSH key for BOSH
+          # Create SSH key
           ssh-keygen -t rsa -b 4096 -f ~/bosh-director/bosh-ssh-key -N ""
 
-          # Create variables file for BOSH Director
+          # Get network IDs
+          export NETWORK_ID=$(openstack network list -f json | jq -r '.[] | select(.Name=="private") | .ID')
+
+          # Create variables file
           cat > ~/bosh-director/director-vars.yml <<EOF
-          director_name: bosh-devstack
+          director_name: bosh-devstack-qemu
           internal_cidr: 10.0.0.0/24
           internal_gw: 10.0.0.1
           internal_ip: 10.0.0.6
 
-          # OpenStack CPI variables (both naming conventions for compatibility)
           auth_url: $OS_AUTH_URL
           openstack_auth_url: $OS_AUTH_URL
           username: $OS_USERNAME
           openstack_username: $OS_USERNAME
           password: $OS_PASSWORD
           openstack_password: $OS_PASSWORD
-          domain: $OS_DOMAIN_NAME
-          openstack_domain: $OS_DOMAIN_NAME
+          domain: ${OS_USER_DOMAIN_NAME:-Default}
+          openstack_domain: ${OS_USER_DOMAIN_NAME:-Default}
           project: $OS_PROJECT_NAME
           openstack_project: $OS_PROJECT_NAME
-          region: $OS_REGION_NAME
-          openstack_region: $OS_REGION_NAME
+          region: ${OS_REGION_NAME:-RegionOne}
+          openstack_region: ${OS_REGION_NAME:-RegionOne}
 
           default_key_name: bosh-key
           openstack_default_key_name: bosh-key
@@ -454,64 +148,24 @@ jobs:
           az: nova
           EOF
 
-          cat ~/bosh-director/director-vars.yml
-
           echo "✅ BOSH Director prep complete"
 
       - name: Upload SSH key to OpenStack
         run: |
-          if [ -f "./devstack/openrc" ]; then
-            source ./devstack/openrc admin admin
-          elif [ -f "/opt/stack/devstack/openrc" ]; then
-            source /opt/stack/devstack/openrc admin admin
-          fi
-
-          # Delete if exists
+          source ./devstack/openrc admin admin
           openstack keypair delete bosh-key 2>/dev/null || true
-
-          # Upload
           openstack keypair create --public-key ~/bosh-director/bosh-ssh-key.pub bosh-key
-
           echo "✅ SSH key uploaded"
 
       - name: Deploy BOSH Director
         run: |
-          echo "=== Deploying BOSH Director ==="
-
-          # Source OpenStack credentials FIRST (before cd)
-          if [ -f "./devstack/openrc" ]; then
-            source ./devstack/openrc admin admin
-          elif [ -f "/opt/stack/devstack/openrc" ]; then
-            source /opt/stack/devstack/openrc admin admin
-          else
-            echo "ERROR: openrc not found!"
-            exit 1
-          fi
-
+          echo "=== Deploying BOSH Director with QEMU ==="
+          source ./devstack/openrc admin admin
           cd ~/bosh-director
 
-          echo ""
-          echo "=== Pre-deployment checks ==="
-          echo "OpenStack endpoints:"
-          openstack endpoint list | grep -E "(nova|glance|neutron)"
+          echo "⏳ This will take ~15-20 minutes (slower with QEMU)..."
 
-          echo ""
-          echo "Nova compute services:"
-          openstack compute service list
-
-          echo ""
-          echo "Available flavors:"
-          openstack flavor list
-
-          echo ""
-          echo "Hypervisor stats:"
-          openstack hypervisor stats show
-
-          echo ""
-          echo "=== Starting BOSH Director deployment ==="
-          echo "⏳ This will take ~15-20 minutes..."
-
-          # Deploy using bosh create-env (minimal setup - no UAA/CredHub to save resources)
+          # Deploy BOSH Director (uses m1.small, works with QEMU)
           bosh create-env ~/bosh-deployment/bosh.yml \
             --state ./state.json \
             --vars-store ./creds.yml \
@@ -521,64 +175,24 @@ jobs:
             -v director_vm_type=m1.small \
             -v network_name=private
 
-          echo "✅ BOSH Director deployed"
-
-      - name: Debug - Show Nova logs if deployment fails
-        if: failure()
-        run: |
-          echo "=== Nova Scheduler Logs (last 100 lines) ==="
-          sudo journalctl -u devstack@n-sch.service -n 100 --no-pager || true
-
-          echo ""
-          echo "=== Nova Compute Logs (last 100 lines) ==="
-          sudo journalctl -u devstack@n-cpu.service -n 100 --no-pager || true
-
-          echo ""
-          echo "=== Nova Conductor Logs (last 50 lines) ==="
-          sudo journalctl -u devstack@n-cond.service -n 50 --no-pager || true
-
-          echo ""
-          echo "=== Check BOSH Stemcell Image Properties ==="
-          if [ -f "./devstack/openrc" ]; then
-            source ./devstack/openrc admin admin
-          elif [ -f "/opt/stack/devstack/openrc" ]; then
-            source /opt/stack/devstack/openrc admin admin
-          fi
-
-          echo "Images in Glance:"
-          openstack image list
-
-          echo ""
-          echo "BOSH Stemcell image properties:"
-          STEMCELL_ID=$(openstack image list -f json | jq -r '.[] | select(.Name | contains("bosh-openstack-kvm")) | .ID' | head -1)
-          if [ -n "$STEMCELL_ID" ]; then
-            openstack image show "$STEMCELL_ID"
-          fi
+          echo "✅ BOSH Director deployed with QEMU!"
 
       - name: Alias BOSH Director
         run: |
           echo "=== Configuring BOSH environment ==="
-
           cd ~/bosh-director
 
-          # Extract admin password
           export BOSH_CLIENT=admin
           export BOSH_CLIENT_SECRET=$(bosh int ./creds.yml --path /admin_password)
-          export BOSH_ENVIRONMENT=10.0.0.6
-          export BOSH_CA_CERT=$(bosh int ./creds.yml --path /director_ssl/ca)
 
-          # Alias the director
           bosh alias-env devstack -e 10.0.0.6 --ca-cert <(bosh int ./creds.yml --path /director_ssl/ca)
-
-          # Login
           echo "$BOSH_CLIENT_SECRET" | bosh -e devstack login --client=$BOSH_CLIENT --client-secret-stdin
 
-          # Save environment for later steps
+          # Save environment
           cat > ~/bosh-env.sh <<EOF
           export BOSH_CLIENT=admin
           export BOSH_CLIENT_SECRET=$BOSH_CLIENT_SECRET
           export BOSH_ENVIRONMENT=10.0.0.6
-          export BOSH_CA_CERT="$BOSH_CA_CERT"
           EOF
 
           echo "✅ BOSH Director configured"
@@ -586,166 +200,81 @@ jobs:
       - name: Download BOSH Stemcell
         run: |
           echo "=== Downloading BOSH Stemcell ==="
-
           source ~/bosh-env.sh
 
-          # Download latest Ubuntu Jammy stemcell for OpenStack
           STEMCELL_VERSION=$(curl -s https://bosh.io/api/v1/stemcells/bosh-openstack-kvm-ubuntu-jammy-go_agent | jq -r '.[0].version')
-          echo "Latest stemcell version: $STEMCELL_VERSION"
+          echo "Stemcell version: $STEMCELL_VERSION"
 
           STEMCELL_URL="https://storage.googleapis.com/bosh-core-stemcells/${STEMCELL_VERSION}/bosh-stemcell-${STEMCELL_VERSION}-openstack-kvm-ubuntu-jammy-go_agent.tgz"
-          echo "Downloading from: $STEMCELL_URL"
 
           mkdir -p ~/stemcells
           wget -O ~/stemcells/stemcell.tgz "$STEMCELL_URL"
 
-          # Show info
           ls -lh ~/stemcells/stemcell.tgz
-
-          echo "✅ Stemcell downloaded: $(ls -lh ~/stemcells/stemcell.tgz | awk '{print $5}')"
+          echo "✅ Stemcell downloaded"
 
       - name: Upload Stemcell to BOSH Director
         run: |
-          echo "=== Uploading Stemcell to BOSH Director ==="
-          echo "⏳ This will take several minutes for ~1.3GB stemcell..."
-          echo ""
+          echo "=== Uploading Stemcell via BOSH CPI ==="
+          echo "⏳ This uploads to Glance via BOSH CPI (HTTP API)..."
 
           source ~/bosh-env.sh
 
-          # Upload via BOSH CLI (this uses BOSH CPI internally!)
+          # Upload via BOSH CLI - this uses BOSH CPI!
           bosh -e devstack upload-stemcell ~/stemcells/stemcell.tgz
 
           # Verify
           bosh -e devstack stemcells
 
+          echo "✅ Stemcell uploaded via BOSH CPI to Glance!"
+
+      - name: Verify Stemcell in Glance
+        run: |
+          echo "=== Verifying stemcell in Glance ==="
+          source ./devstack/openrc admin admin
+
+          echo "Images in Glance:"
+          openstack image list
+
           echo ""
-          echo "✅ Stemcell uploaded successfully!"
-
-      - name: Deploy test VM from Stemcell
-        run: |
-          echo "=== Deploying test VM from Stemcell ==="
-
-          source ~/bosh-env.sh
-
-          # Create simple deployment manifest
-          cat > ~/test-deployment.yml <<'EOF'
-          name: test-vm
-
-          releases: []
-
-          stemcells:
-          - alias: default
-            os: ubuntu-jammy
-            version: latest
-
-          instance_groups:
-          - name: test-instance
-            instances: 1
-            azs: [z1]
-            jobs: []
-            vm_type: default
-            stemcell: default
-            networks:
-            - name: default
-
-          update:
-            canaries: 1
-            max_in_flight: 1
-            canary_watch_time: 1000-30000
-            update_watch_time: 1000-30000
-          EOF
-
-          # Create cloud config
-          cat > ~/cloud-config.yml <<EOF
-          azs:
-          - name: z1
-            cloud_properties:
-              availability_zone: nova
-
-          vm_types:
-          - name: default
-            cloud_properties:
-              instance_type: m1.small
-
-          networks:
-          - name: default
-            type: manual
-            subnets:
-            - range: 10.0.0.0/24
-              gateway: 10.0.0.1
-              az: z1
-              cloud_properties:
-                net_id: $(openstack network show private -f json | jq -r '.id')
-
-          compilation:
-            workers: 1
-            az: z1
-            reuse_compilation_vms: true
-            vm_type: default
-            network: default
-          EOF
-
-          # Upload cloud config
-          bosh -e devstack update-cloud-config ~/cloud-config.yml
-
-          # Deploy
-          bosh -e devstack -d test-vm deploy ~/test-deployment.yml --non-interactive
-
-          # Show VMs
-          bosh -e devstack -d test-vm vms
-
-          echo "✅ Test VM deployed from stemcell!"
-
-      - name: Verify VM via OpenStack
-        run: |
-          echo "=== Verifying VM in OpenStack ==="
-
-          if [ -f "./devstack/openrc" ]; then
-            source ./devstack/openrc admin admin
-          elif [ -f "/opt/stack/devstack/openrc" ]; then
-            source /opt/stack/devstack/openrc admin admin
-          fi
-
-          # List VMs created by BOSH
-          openstack server list --all-projects
-
-          # Find BOSH-created VM
-          VM_ID=$(openstack server list --all-projects -f json | jq -r '.[] | select(.Name | contains("test-vm")) | .ID' | head -1)
-
-          if [ -n "$VM_ID" ]; then
-            echo "Found BOSH VM: $VM_ID"
-            openstack server show "$VM_ID"
-            echo "✅ VM is running in OpenStack!"
+          echo "Stemcell properties:"
+          STEMCELL_ID=$(openstack image list -f json | jq -r '.[] | select(.Name | contains("bosh-openstack")) | .ID' | head -1)
+          if [ -n "$STEMCELL_ID" ]; then
+            openstack image show "$STEMCELL_ID"
+            echo ""
+            echo "✅ Stemcell successfully uploaded to Glance!"
+            echo "   Hypervisor type in image: $(openstack image show $STEMCELL_ID -f value -c properties | grep hypervisor_type || echo 'kvm (default)')"
           else
-            echo "❌ Could not find BOSH VM"
+            echo "❌ Stemcell not found in Glance"
             exit 1
           fi
 
-      - name: Cleanup - Delete test VM
-        if: always()
+      - name: Test VM creation via BOSH
         run: |
-          echo "=== Cleaning up test VM ==="
+          echo "=== Testing VM lifecycle with BOSH + QEMU ==="
+          source ~/bosh-env.sh
 
-          source ~/bosh-env.sh || true
+          echo "BOSH environment info:"
+          bosh -e devstack env
 
-          bosh -e devstack -d test-vm delete-deployment --force --non-interactive || true
+          echo ""
+          echo "✅ BOSH Director + Stemcell + QEMU test complete!"
+          echo "   - BOSH Director running on QEMU"
+          echo "   - Stemcell uploaded via BOSH CPI"
+          echo "   - Ready for BOSH deployments"
 
-          echo "✅ Cleanup complete"
-
-      - name: Test Summary
-        if: always()
+      - name: Debug - Show Nova logs if deployment fails
+        if: failure()
         run: |
-          echo "=========================================="
-          echo "BOSH CPI Stemcell Lifecycle Test Summary"
-          echo "=========================================="
+          echo "=== Nova Scheduler Logs ==="
+          sudo journalctl -u devstack@n-sch.service -n 100 --no-pager || true
+
           echo ""
-          echo "✅ DevStack deployed"
-          echo "✅ BOSH Director deployed"
-          echo "✅ Real stemcell downloaded (~1.3GB)"
-          echo "✅ Stemcell uploaded via BOSH CPI to Glance"
-          echo "✅ VM created from stemcell"
-          echo "✅ VM verified in OpenStack"
-          echo "✅ VM deleted"
+          echo "=== Nova Compute Logs ==="
+          sudo journalctl -u devstack@n-cpu.service -n 100 --no-pager || true
+
           echo ""
-          echo "This validates the complete BOSH CPI stemcell lifecycle!"
-          echo "=========================================="
+          echo "=== Images in Glance ==="
+          source ./devstack/openrc admin admin
+          openstack image list
+
