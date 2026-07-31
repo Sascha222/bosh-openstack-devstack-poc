@@ -626,14 +626,65 @@ QEMU = Software Emulation → **10-50x langsamer** als KVM!
 
 **Status (2026-07-31):**
 - KVM Workflow: ❌ Funktioniert nicht (Nova = QEMU trotz allem)
-- QEMU Workflow: 🔄 Erstellt, noch nicht getestet
-- Nächster Test: QEMU Workflow ausführen und schauen ob Scheduler-Trick funktioniert
+- QEMU Workflow: ❌ **Auch gescheitert - ImagePropertiesFilter Deaktivierung half NICHT!**
+
+**QEMU Workflow Test-Ergebnis (2026-07-31):**
+
+Nach Korrektur der Workflow-Datei (`.github/workflows/` statt root) lief der QEMU-Workflow, aber:
+
+```
+❌ FEHLER beim BOSH Director Deployment:
+CPI 'create_vm' method responded with error: 
+CmdError{"type":"Bosh::Clouds::VMCreationFailed",
+"message":"Server `40c5e5cb-00ea-4914-9001-6154a27a71e0' state is error, expected active
+No valid host was found."
+```
+
+**Was das bedeutet:**
+
+Das Deaktivieren von `ImagePropertiesFilter` hat **NICHT** gereicht!
+
+Nova Scheduler hat **trotzdem** den hypervisor_type-Mismatch erkannt:
+- Stemcell sagt: `hypervisor_type='kvm'` (aus Glance metadata)
+- Nova Compute meldet: `hypervisor_type='QEMU'`
+- Ergebnis: "No valid host was found"
+
+**Warum der Trick nicht funktioniert hat:**
+
+1. **Möglichkeit 1:** Nova hat ANDERE Filter die auch hypervisor_type prüfen
+   - Vielleicht `ComputeCapabilitiesFilter` oder interner Check
+   - ImagePropertiesFilter war nicht der einzige Check
+
+2. **Möglichkeit 2:** Hypervisor Type Check ist hardcoded im Nova Scheduler
+   - Nicht nur über Filter, sondern direkt in Placement Query
+   - Kann nicht umgangen werden
+
+3. **Möglichkeit 3:** Stemcell-Properties werden von BOSH CPI gesetzt
+   - BOSH CPI könnte beim Upload explizit `hypervisor_type=kvm` setzen
+   - Nova sieht das und lehnt ab - völlig unabhängig von Filtern
+
+**Nächster möglicher Ansatz (nicht getestet):**
+
+```bash
+# Nach BOSH CPI Stemcell Upload:
+STEMCELL_ID=$(openstack image list -f json | jq -r '.[] | select(.Name | contains("bosh-openstack")) | .ID')
+openstack image set --property hypervisor_type=qemu "$STEMCELL_ID"
+
+# Dann erneut BOSH Director deployment versuchen
+```
+
+**Problem mit diesem Ansatz:**
+- ⚠️ Sehr hacky - manipuliert BOSH CPI Ergebnis nachträglich
+- ⚠️ Nicht production-like
+- ⚠️ Müsste für jedes Stemcell wiederholt werden
+- ❌ Könnte BOSH verwirren (CPI sagt KVM, Glance sagt QEMU)
 
 **Referenz:**
 - Branch: `feature/bosh-qemu-test`
-- Workflow: `bosh-director-qemu-test.yml`
+- Workflow: `bosh-director-qemu-test.yml` (in `.github/workflows/`)
 - Commits: Dutzende KVM-Fix-Versuche auf `feature/bats-with-bosh-director`
 - Community Discussion: https://github.com/orgs/community/discussions/160591
+- **Test-Run:** 2026-07-31 - "No valid host was found" trotz ImagePropertiesFilter Deaktivierung
 
 ---
 
