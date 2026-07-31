@@ -59,48 +59,55 @@ jobs:
             ENABLED_SERVICES+=,c-sch,c-api,c-vol
             ENABLED_SERVICES+=,q-svc,ovn-controller,ovn-northd,q-ovn-metadata-agent
 
-      - name: Debug KVM availability
+      - name: Load KVM kernel modules
         run: |
-          echo "=== Checking if GitHub Actions runner supports KVM ==="
-
-          echo "1. Does /dev/kvm exist?"
-          ls -la /dev/kvm || echo "❌ /dev/kvm does NOT exist"
-
-          echo ""
-          echo "2. CPU virtualization support:"
-          grep -E 'vmx|svm' /proc/cpuinfo || echo "❌ No vmx/svm in /proc/cpuinfo"
+          echo "=== Loading KVM kernel modules ==="
+          echo "Reference: https://github.com/orgs/community/discussions/160591"
+          echo "GitHub Actions runners support nested virtualization since 2024!"
 
           echo ""
-          echo "3. Kernel KVM module loaded?"
-          lsmod | grep kvm || echo "❌ KVM module not loaded"
-
-          echo ""
-          echo "4. Can we load kvm module?"
-          sudo modprobe kvm || echo "❌ Cannot load kvm module"
-          sudo modprobe kvm-intel || echo "⚠️  kvm-intel failed (might be AMD)"
-          sudo modprobe kvm-amd || echo "⚠️  kvm-amd failed (might be Intel)"
-
-          echo ""
-          echo "5. Kernel modules after modprobe:"
-          lsmod | grep kvm
-
-          echo ""
-          echo "6. /dev/kvm after modprobe:"
-          ls -la /dev/kvm || echo "❌ Still no /dev/kvm"
-
-          echo ""
-          echo "7. Test if KVM actually works:"
-          if [ -c /dev/kvm ]; then
-            echo "✅ /dev/kvm is a character device"
-            # Try to open /dev/kvm (will fail with EACCES if no permission, or succeed)
-            sudo -u runner dd if=/dev/kvm of=/dev/null count=1 2>&1 | head -5
+          echo "1. CPU virtualization support:"
+          CPU_COUNT=$(grep -Ec '(vmx|svm)' /proc/cpuinfo)
+          if [ "$CPU_COUNT" -gt 0 ]; then
+            echo "✅ CPU supports virtualization (vmx/svm found in $CPU_COUNT cores)"
           else
-            echo "❌ /dev/kvm is NOT a character device!"
+            echo "❌ No vmx/svm in /proc/cpuinfo - nested virt not supported"
+            exit 1
           fi
 
           echo ""
-          echo "8. What does libvirt see?"
-          sudo virsh capabilities | grep -E "<domain type=|<acceleration" | head -10
+          echo "2. Loading KVM kernel modules:"
+          sudo modprobe kvm || {
+            echo "❌ Failed to load kvm module"
+            exit 1
+          }
+
+          # Try both Intel and AMD (one will succeed)
+          sudo modprobe kvm-intel 2>/dev/null && echo "✅ Loaded kvm-intel (Intel CPU)" || true
+          sudo modprobe kvm-amd 2>/dev/null && echo "✅ Loaded kvm-amd (AMD CPU)" || true
+
+          echo ""
+          echo "3. Verify KVM modules loaded:"
+          if lsmod | grep -q kvm; then
+            echo "✅ KVM modules loaded:"
+            lsmod | grep kvm
+          else
+            echo "❌ KVM module not loaded"
+            exit 1
+          fi
+
+          echo ""
+          echo "4. Check /dev/kvm exists:"
+          if [ -c /dev/kvm ]; then
+            ls -la /dev/kvm
+            echo "✅ /dev/kvm is a character device"
+          else
+            echo "❌ /dev/kvm does not exist or is not a character device"
+            exit 1
+          fi
+
+          echo ""
+          echo "✅ KVM kernel modules loaded successfully!"
 
       - name: Restart Libvirt and Nova Compute with KVM access
         run: |
