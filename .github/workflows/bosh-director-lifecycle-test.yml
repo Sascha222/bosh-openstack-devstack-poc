@@ -59,25 +59,48 @@ jobs:
             ENABLED_SERVICES+=,c-sch,c-api,c-vol
             ENABLED_SERVICES+=,q-svc,ovn-controller,ovn-northd,q-ovn-metadata-agent
 
-      - name: Enable KVM permissions for all users
+      - name: Debug KVM availability
         run: |
-          echo "=== Enabling KVM for all users via udev rules ==="
-          echo "This allows Nova (and any process) to use /dev/kvm without group membership"
+          echo "=== Checking if GitHub Actions runner supports KVM ==="
 
-          # Create udev rule to make /dev/kvm accessible to everyone
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-
-          # Reload udev rules and apply immediately
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-
-          # Verify permissions changed
-          echo ""
-          echo "New /dev/kvm permissions:"
-          ls -la /dev/kvm
+          echo "1. Does /dev/kvm exist?"
+          ls -la /dev/kvm || echo "❌ /dev/kvm does NOT exist"
 
           echo ""
-          echo "✅ KVM is now accessible to all processes!"
+          echo "2. CPU virtualization support:"
+          grep -E 'vmx|svm' /proc/cpuinfo || echo "❌ No vmx/svm in /proc/cpuinfo"
+
+          echo ""
+          echo "3. Kernel KVM module loaded?"
+          lsmod | grep kvm || echo "❌ KVM module not loaded"
+
+          echo ""
+          echo "4. Can we load kvm module?"
+          sudo modprobe kvm || echo "❌ Cannot load kvm module"
+          sudo modprobe kvm-intel || echo "⚠️  kvm-intel failed (might be AMD)"
+          sudo modprobe kvm-amd || echo "⚠️  kvm-amd failed (might be Intel)"
+
+          echo ""
+          echo "5. Kernel modules after modprobe:"
+          lsmod | grep kvm
+
+          echo ""
+          echo "6. /dev/kvm after modprobe:"
+          ls -la /dev/kvm || echo "❌ Still no /dev/kvm"
+
+          echo ""
+          echo "7. Test if KVM actually works:"
+          if [ -c /dev/kvm ]; then
+            echo "✅ /dev/kvm is a character device"
+            # Try to open /dev/kvm (will fail with EACCES if no permission, or succeed)
+            sudo -u runner dd if=/dev/kvm of=/dev/null count=1 2>&1 | head -5
+          else
+            echo "❌ /dev/kvm is NOT a character device!"
+          fi
+
+          echo ""
+          echo "8. What does libvirt see?"
+          sudo virsh capabilities | grep -E "<domain type=|<acceleration" | head -10
 
       - name: Restart Libvirt and Nova Compute with KVM access
         run: |
