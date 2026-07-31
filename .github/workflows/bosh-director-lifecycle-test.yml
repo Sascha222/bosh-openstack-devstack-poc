@@ -59,12 +59,12 @@ jobs:
             ENABLED_SERVICES+=,c-sch,c-api,c-vol
             ENABLED_SERVICES+=,q-svc,ovn-controller,ovn-northd,q-ovn-metadata-agent
 
-      - name: Wait for DevStack to stabilize
-        run: sleep 30
-
-      - name: Fix KVM permissions for Nova Compute
+      - name: Fix KVM permissions for Nova Compute IMMEDIATELY
         run: |
           echo "=== Fixing KVM permissions for Nova Compute ==="
+          echo "⚠️  CRITICAL: Must happen BEFORE Nova registers at Placement!"
+          echo ""
+
           echo "Current state:"
           ls -la /dev/kvm
           groups runner | grep -q kvm && echo "runner already in kvm group" || echo "runner NOT in kvm group"
@@ -74,7 +74,7 @@ jobs:
           sudo usermod -aG kvm runner
 
           echo ""
-          echo "CRITICAL: Nova already registered as QEMU at Placement!"
+          echo "CRITICAL: Nova likely already registered as QEMU at Placement!"
           echo "We need to DELETE both compute service AND placement provider!"
 
           # Source OpenStack credentials
