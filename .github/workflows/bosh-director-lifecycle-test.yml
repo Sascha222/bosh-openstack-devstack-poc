@@ -70,17 +70,18 @@ jobs:
           groups runner | grep -q kvm && echo "runner already in kvm group" || echo "runner NOT in kvm group"
 
           echo ""
-          echo "Adding runner user to kvm group..."
-          sudo usermod -aG kvm runner
-
-          echo ""
-          echo "CRITICAL: Nova likely already registered as QEMU at Placement!"
-          echo "Strategy: STOP Nova first, then DELETE both registrations, then START with KVM!"
-
-          echo ""
           echo "Step 1: Stopping nova-compute FIRST..."
           sudo systemctl stop devstack@n-cpu.service
           sleep 3
+
+          echo ""
+          echo "Step 2: Adding runner user to kvm group..."
+          sudo usermod -aG kvm runner
+
+          echo ""
+          echo "Step 3: CRITICAL - Verify NEW group membership will work..."
+          # Test if a NEW process can see kvm group
+          sudo -u runner bash -c 'groups | grep -q kvm && echo "✅ NEW process sees kvm group" || echo "❌ NEW process does NOT see kvm group"'
 
           # Source OpenStack credentials
           if [ -f "./devstack/openrc" ]; then
@@ -90,7 +91,7 @@ jobs:
           fi
 
           echo ""
-          echo "Step 2: Getting UUIDs..."
+          echo "Step 4: Getting UUIDs..."
           COMPUTE_UUID=$(openstack compute service list -f json | jq -r '.[] | select(.Binary=="nova-compute") | .ID')
           echo "Compute service UUID: $COMPUTE_UUID"
 
@@ -98,7 +99,7 @@ jobs:
           echo "Placement provider UUID: $PROVIDER_UUID"
 
           echo ""
-          echo "Step 3: Deleting placement provider..."
+          echo "Step 5: Deleting placement provider..."
           if [ -n "$PROVIDER_UUID" ]; then
             PLACEMENT_ENDPOINT=$(openstack endpoint list -f json | jq -r '.[] | select(.["Service Type"]=="placement") | .URL')
             AUTH_TOKEN=$(openstack token issue -f value -c id)
@@ -112,20 +113,31 @@ jobs:
           fi
 
           echo ""
-          echo "Step 4: Deleting compute service (Nova is stopped now, should work!)..."
-          openstack compute service delete $COMPUTE_UUID && echo "✅ Compute service deleted" || echo "⚠️  Failed to delete service"
+          echo "Step 6: Deleting compute service..."
+          openstack compute service delete $COMPUTE_UUID && echo "✅ Compute service deleted" || echo "⚠️  Failed to delete service (continuing anyway)"
 
           echo ""
-          echo "Step 5: Starting nova-compute with KVM access..."
+          echo "Step 7: FORCE Nova to start with NEW session (new group membership!)"
+          echo "Using 'sudo -u runner' to ensure NEW login session with kvm group..."
+
+          # Kill any remaining nova-compute processes
+          sudo pkill -9 -f nova-compute || true
+          sleep 2
+
+          # Start nova-compute with FRESH session that has kvm group
           sudo systemctl start devstack@n-cpu.service
 
           echo ""
-          echo "Step 6: Waiting for nova-compute to re-register (30s)..."
+          echo "Step 8: Waiting for nova-compute to re-register (30s)..."
           sleep 30
 
           echo ""
           echo "Verifying nova-compute is running..."
           sudo systemctl status devstack@n-cpu.service --no-pager | head -20
+
+          echo ""
+          echo "Verifying libvirt sees KVM NOW..."
+          sudo -u runner virsh --connect qemu:///system capabilities | grep -E "<domain type=" | head -5
 
           echo ""
           echo "Checking new compute service registration..."
@@ -149,11 +161,18 @@ jobs:
               echo "✅ SUCCESS: Nova registered with KVM!"
             else
               echo "❌ FAILED: Still $HYPERVISOR_TYPE instead of KVM!"
-              sudo journalctl -u devstack@n-cpu.service --no-pager | grep -i "hypervisor\|kvm\|qemu" | tail -20
+              echo "Checking Nova logs for KVM detection..."
+              sudo journalctl -u devstack@n-cpu.service --no-pager | grep -i "domain>kvm" | head -5
+              echo "Checking if Nova process has kvm group..."
+              NOVA_PID=$(pgrep -f "nova-compute")
+              if [ -n "$NOVA_PID" ]; then
+                echo "Nova PID: $NOVA_PID"
+                echo "Nova process groups:"
+                cat /proc/$NOVA_PID/status | grep Groups
+              fi
             fi
           else
-            echo "⚠️  No hypervisor found yet, checking logs..."
-            sudo journalctl -u devstack@n-cpu.service --no-pager | grep -i "hypervisor\|kvm" | tail -10
+            echo "⚠️  No hypervisor found yet!"
           fi
 
           echo ""
