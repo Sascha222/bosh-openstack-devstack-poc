@@ -75,7 +75,12 @@ jobs:
 
           echo ""
           echo "CRITICAL: Nova likely already registered as QEMU at Placement!"
-          echo "We need to DELETE both compute service AND placement provider!"
+          echo "Strategy: STOP Nova first, then DELETE both registrations, then START with KVM!"
+
+          echo ""
+          echo "Step 1: Stopping nova-compute FIRST..."
+          sudo systemctl stop devstack@n-cpu.service
+          sleep 3
 
           # Source OpenStack credentials
           if [ -f "./devstack/openrc" ]; then
@@ -85,19 +90,16 @@ jobs:
           fi
 
           echo ""
-          echo "Getting compute service UUID..."
+          echo "Step 2: Getting UUIDs..."
           COMPUTE_UUID=$(openstack compute service list -f json | jq -r '.[] | select(.Binary=="nova-compute") | .ID')
           echo "Compute service UUID: $COMPUTE_UUID"
 
-          echo ""
-          echo "Getting placement provider UUID..."
           PROVIDER_UUID=$(openstack resource provider list -f json | jq -r '.[0].uuid' 2>/dev/null)
           echo "Placement provider UUID: $PROVIDER_UUID"
 
           echo ""
-          echo "Deleting placement provider (this will also clean up registration)..."
+          echo "Step 3: Deleting placement provider..."
           if [ -n "$PROVIDER_UUID" ]; then
-            # Use placement API directly via curl
             PLACEMENT_ENDPOINT=$(openstack endpoint list -f json | jq -r '.[] | select(.["Service Type"]=="placement") | .URL')
             AUTH_TOKEN=$(openstack token issue -f value -c id)
 
@@ -106,24 +108,19 @@ jobs:
               -H "X-Auth-Token: $AUTH_TOKEN" \
               -H "OpenStack-API-Version: placement 1.36" \
               "$PLACEMENT_ENDPOINT/resource_providers/$PROVIDER_UUID" \
-              -w "\nHTTP Status: %{http_code}\n" || echo "Failed to delete provider (may have allocations)"
+              -w "\nHTTP Status: %{http_code}\n" || echo "Failed to delete provider"
           fi
 
           echo ""
-          echo "Deleting compute service..."
-          openstack compute service delete $COMPUTE_UUID || echo "Failed to delete service"
+          echo "Step 4: Deleting compute service (Nova is stopped now, should work!)..."
+          openstack compute service delete $COMPUTE_UUID && echo "✅ Compute service deleted" || echo "⚠️  Failed to delete service"
 
           echo ""
-          echo "Stopping nova-compute..."
-          sudo systemctl stop devstack@n-cpu.service
-          sleep 5
-
-          echo ""
-          echo "Starting nova-compute with KVM access..."
+          echo "Step 5: Starting nova-compute with KVM access..."
           sudo systemctl start devstack@n-cpu.service
 
           echo ""
-          echo "Waiting for nova-compute to re-register (30s)..."
+          echo "Step 6: Waiting for nova-compute to re-register (30s)..."
           sleep 30
 
           echo ""
@@ -145,14 +142,22 @@ jobs:
           HYPERVISOR_ID=$(openstack hypervisor list -f value -c ID 2>/dev/null || echo "")
           if [ -n "$HYPERVISOR_ID" ]; then
             echo "Hypervisor found: $HYPERVISOR_ID"
-            openstack hypervisor show "$HYPERVISOR_ID" | grep hypervisor_type
+            HYPERVISOR_TYPE=$(openstack hypervisor show "$HYPERVISOR_ID" -f value -c hypervisor_type)
+            echo "Hypervisor Type: $HYPERVISOR_TYPE"
+
+            if [ "$HYPERVISOR_TYPE" = "KVM" ]; then
+              echo "✅ SUCCESS: Nova registered with KVM!"
+            else
+              echo "❌ FAILED: Still $HYPERVISOR_TYPE instead of KVM!"
+              sudo journalctl -u devstack@n-cpu.service --no-pager | grep -i "hypervisor\|kvm\|qemu" | tail -20
+            fi
           else
             echo "⚠️  No hypervisor found yet, checking logs..."
             sudo journalctl -u devstack@n-cpu.service --no-pager | grep -i "hypervisor\|kvm" | tail -10
           fi
 
           echo ""
-          echo "✅ KVM permissions fixed and compute service re-registered"
+          echo "✅ KVM permissions fix complete"
 
       - name: Verify Nova KVM Configuration
         run: |
