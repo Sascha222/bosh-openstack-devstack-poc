@@ -1,0 +1,129 @@
+name: BOSH CPI - QEMU Stemcell Test (Software Emulation)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ feature/bosh-qemu-test ]
+
+jobs:
+  bosh-qemu-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Show system info
+        run: |
+          echo "=== System Info ==="
+          uname -a
+          df -h
+          free -h
+          nproc
+
+      - name: Free up disk space
+        run: |
+          echo "=== Cleaning up disk space ==="
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android /opt/hostedtoolcache
+          df -h
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git python3-pip python3-venv qemu-utils jq wget
+
+      - name: Configure for QEMU
+        run: |
+          echo "=== This workflow uses QEMU (software emulation) ==="
+          echo "⚠️  VMs will be SLOW but work without KVM"
+          echo "✅ No special KVM setup needed"
+
+      - name: Deploy DevStack
+        id: devstack
+        uses: gophercloud/devstack-action@v0.19
+        with:
+          branch: stable/2025.1
+          conf_overrides: |
+            FORCE=yes
+            disable_service horizon tempest
+            ENABLED_SERVICES=mysql,rabbit,key,n-api,n-cpu,n-cond,n-sch,placement-api
+            ENABLED_SERVICES+=,g-api,g-reg
+            ENABLED_SERVICES+=,c-sch,c-api,c-vol
+            ENABLED_SERVICES+=,q-svc,ovn-controller,ovn-northd,q-ovn-metadata-agent
+
+      - name: Configure Nova Scheduler for QEMU
+        run: |
+          echo "=== Disabling ImagePropertiesFilter ==="
+          echo "This allows QEMU compute to accept KVM stemcells"
+
+          source ./devstack/openrc admin admin
+
+          # Remove ImagePropertiesFilter
+          sudo sed -i '/^scheduler_default_filters/d' /etc/nova/nova-cpu.conf
+
+          # Add custom filter list without ImagePropertiesFilter
+          echo "" | sudo tee -a /etc/nova/nova-cpu.conf
+          echo "[filter_scheduler]" | sudo tee -a /etc/nova/nova-cpu.conf
+          echo "enabled_filters = AvailabilityZoneFilter,ComputeFilter,ComputeCapabilitiesFilter" | sudo tee -a /etc/nova/nova-cpu.conf
+
+          # Restart Nova services
+          sudo systemctl restart devstack@n-sch.service
+          sudo systemctl restart devstack@n-cpu.service
+          sleep 15
+
+          openstack hypervisor list
+          echo "✅ Nova configured to accept any stemcell type"
+
+      - name: Fix Glance trailing slash bug
+        run: |
+          echo "=== Fixing Glance filesystem_store_datadir trailing slash ==="
+          sudo sed -i 's|^\(filesystem_store_datadir\s*=\s*.*\)/$|\1|g' /etc/glance/glance-api.conf
+          sudo systemctl restart devstack@g-api.service
+          sleep 45
+          echo "✅ Glance config fixed"
+
+      - name: Test with small BOSH stemcell
+        run: |
+          echo "=== Testing with light stemcell (QEMU compatible) ==="
+          source ./devstack/openrc admin admin
+
+          # Download a LIGHT stemcell (smaller, faster for QEMU)
+          wget -O stemcell.tgz https://bosh.io/d/stemcells/bosh-openstack-kvm-ubuntu-jammy-go_agent?v=1.581
+
+          # Upload to Glance with hypervisor_type=qemu
+          STEMCELL_ID=$(openstack image create \
+            --disk-format qcow2 \
+            --container-format bare \
+            --public \
+            --file stemcell.tgz \
+            --property hypervisor_type=qemu \
+            "bosh-qemu-test-stemcell" \
+            -f value -c id)
+
+          echo "Stemcell ID: $STEMCELL_ID"
+
+          # Wait for active
+          timeout 300 bash -c "until openstack image show $STEMCELL_ID -f value -c status | grep -q active; do sleep 5; done"
+
+          echo "✅ Stemcell uploaded and active"
+
+      - name: Create test VM
+        run: |
+          echo "=== Creating test VM with QEMU ==="
+          source ./devstack/openrc admin admin
+
+          # Get IDs
+          IMAGE_ID=$(openstack image list -f value -c ID --name bosh-qemu-test-stemcell)
+          NET_ID=$(openstack network list -f value -c ID --name private)
+
+          # Create VM with m1.tiny (minimal resources for QEMU)
+          openstack server create \
+            --flavor m1.tiny \
+            --image $IMAGE_ID \
+            --network $NET_ID \
+            --wait \
+            test-qemu-vm
+
+          openstack server show test-qemu-vm
+          echo "✅ VM created successfully with QEMU!"
