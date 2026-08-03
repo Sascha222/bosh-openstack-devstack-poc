@@ -256,6 +256,12 @@ jobs:
           BOSH_OPENSTACK_WRITE_TIMEOUT: "180"
           BOSH_OPENSTACK_FLAVOR_WITH_NO_ROOT_DISK: no-root-disk
           BOSH_OPENSTACK_EXCLUDE_CINDER_V1: "true"
+          # Optional vars the script references bare under `set -u`; bind empty.
+          BOSH_OPENSTACK_AUTH_URL_V2: ""
+          BOSH_OPENSTACK_USERNAME_V2: ""
+          BOSH_OPENSTACK_API_KEY_V2: ""
+          BOSH_OPENSTACK_CA_CERT: ""
+          BOSH_OPENSTACK_VOLUME_TYPE: ""
         run: |
           mkdir -p output
           bash bosh-openstack-cpi-release/ci/tasks/run-lifecycle.sh
