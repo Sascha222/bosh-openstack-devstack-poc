@@ -36,6 +36,14 @@ cat > "${DEP}/ops_local_stemcell.yml" <<EOF
   value:
     url: file://${PWD}/stemcell-director/stemcell.tgz
 EOF
+# bosh-deployment/openstack/cpi.yml hardcodes the director to m1.xlarge
+# (8 vCPU / 16GB), which the single DevStack compute node on a CI runner cannot
+# satisfy -> "No valid host". Shrink it to m1.small.
+cat > "${DEP}/ops_flavor.yml" <<EOF
+- type: replace
+  path: /resource_pools/name=vms/cloud_properties/instance_type
+  value: m1.small
+EOF
 
 NET_ID="$(jq -r .primary_net_id "${META}")"
 SG="$(jq -r .security_group "${META}")"
@@ -53,6 +61,7 @@ bosh create-env "${BOSH_DEPLOYMENT}/bosh.yml" \
   -o "${BOSH_DEPLOYMENT}/jumpbox-user.yml" \
   -o "${DEP}/ops_local_cpi.yml" \
   -o "${DEP}/ops_local_stemcell.yml" \
+  -o "${DEP}/ops_flavor.yml" \
   -v director_name=bosh \
   -v internal_ip="${INTERNAL_IP}" \
   -v internal_gw="${GW}" \

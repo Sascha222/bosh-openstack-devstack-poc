@@ -48,7 +48,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout CPI release
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: cloudfoundry/bosh-openstack-cpi-release
           path: cpi-release
@@ -71,12 +71,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout CPI release
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: cloudfoundry/bosh-openstack-cpi-release
           path: cpi-release
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: cpi-release/src/openstack_cpi_golang/go.mod
       - name: golangci-lint
@@ -97,7 +97,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-devstack
       - name: Inspect OpenStack
         run: |
@@ -115,7 +115,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-devstack
 
       - name: Upload Cirros image
@@ -183,10 +183,10 @@ jobs:
     timeout-minutes: 180
     needs: [ unit-specs ]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Checkout CPI release
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: cloudfoundry/bosh-openstack-cpi-release
           path: bosh-openstack-cpi-release
@@ -297,10 +297,12 @@ jobs:
         run: |
           mkdir -p output
           # Quiet the CPI's excon DEBUG request/response flood: the specs build
-          # the logger at DEBUG by default. Raise it to WARN. (Safe to edit the
-          # checked-out spec; this job doesn't build a release.)
+          # the logger at DEBUG by default. Raise it to INFO — this drops the
+          # per-request excon spam but keeps the useful "Creating VM / Waiting
+          # for..." progress lines. (Safe to edit the checked-out spec; this job
+          # doesn't build a release.)
           sed -i -E \
-            's/(@logger = Bosh::Cpi::Logger.new\(STDERR\))/\1; @logger.level = Logger::WARN/' \
+            's/(@logger = Bosh::Cpi::Logger.new\(STDERR\))/\1; @logger.level = Logger::INFO/' \
             bosh-openstack-cpi-release/src/bosh_openstack_cpi/spec/integration/support/integration_config.rb
           bash bosh-openstack-cpi-release/ci/tasks/run-lifecycle.sh
 
@@ -319,10 +321,10 @@ jobs:
     timeout-minutes: 180
     needs: [ unit-specs ]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Checkout bosh-deployment
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: cloudfoundry/bosh-deployment
           path: bosh-deployment
@@ -395,3 +397,12 @@ jobs:
       - name: Boot a VM through the director
         run: bash scripts/boot-vm.sh
 
+      - name: Nova logs (on failure)
+        if: failure()
+        run: |
+          # Print the scheduler/compute logs to the job console so a
+          # "No valid host" reason is visible without downloading artifacts.
+          for svc in n-sch n-cpu n-cond; do
+            echo "==================== devstack@${svc} ===================="
+            sudo journalctl -u "devstack@${svc}" --no-pager | tail -100 || true
+          done
