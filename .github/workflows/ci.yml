@@ -395,7 +395,10 @@ jobs:
           availability_zone: "null"
           openstack_ca_file_path: /opt/stack/data/ca-bundle.pem
           DEBUG_BATS: "true"
-        run: bash bosh-openstack-cpi-release/ci/tasks/deploy-manual-networking.sh
+        run: |
+          # deploy-manual-networking.sh expects this output dir to exist
+          mkdir -p bosh-director-deployment
+          bash bosh-openstack-cpi-release/ci/tasks/deploy-manual-networking.sh
 
       - name: Boot a VM through the director
         run: |
