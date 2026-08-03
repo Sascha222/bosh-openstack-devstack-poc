@@ -8,7 +8,7 @@
 # builds the CPI from source and dumps the interpolated manifest to the log).
 #
 # Required env (set by ci.yml):
-#   OS_AUTH_URL, director flavor/timeouts, etc. via the vars below.
+#   OS_AUTH_URL
 # Reads network facts from terraform-cpi/metadata (bats topology).
 set -euo pipefail
 
@@ -21,6 +21,7 @@ mkdir -p "${DEP}"
 
 echo "Downloading released bosh-openstack-cpi..."
 wget -q "${CPI_RELEASE_URL}" -O "${DEP}/cpi.tgz"
+echo "CPI downloaded."
 
 # Local-artifact ops: released CPI + the stemcell we already downloaded.
 cat > "${DEP}/ops_local_cpi.yml" <<EOF
@@ -30,19 +31,30 @@ cat > "${DEP}/ops_local_cpi.yml" <<EOF
     name: bosh-openstack-cpi
     url: file://${PWD}/${DEP}/cpi.tgz
 EOF
+
 cat > "${DEP}/ops_local_stemcell.yml" <<EOF
 - type: replace
   path: /resource_pools/name=vms/stemcell?
   value:
     url: file://${PWD}/stemcell-director/stemcell.tgz
 EOF
-# bosh-deployment/openstack/cpi.yml hardcodes the director to m1.xlarge
-# (8 vCPU / 16GB), which the single DevStack compute node on a CI runner cannot
-# satisfy -> "No valid host". Shrink it to m1.small.
+
+# bosh-deployment/openstack/cpi.yml hardcodes m1.xlarge (8vCPU/16GB) — too big
+# for a single DevStack compute node on a CI runner.
 cat > "${DEP}/ops_flavor.yml" <<EOF
 - type: replace
   path: /resource_pools/name=vms/cloud_properties/instance_type
   value: m1.small
+EOF
+
+# Use internal-only networking: the runner reaches the director via a host route
+# to the tenant subnet, so we don't need a VIP/external IP.
+# external-ip-not-recommended.yml sets cloud_provider/mbus to external_ip:6868
+# which requires a VIP network and floating IP — remove it.
+cat > "${DEP}/ops_internal_only.yml" <<EOF
+- type: replace
+  path: /cloud_provider/mbus
+  value: "https://mbus:((mbus_bootstrap_password))@((internal_ip)):6868"
 EOF
 
 NET_ID="$(jq -r .primary_net_id "${META}")"
@@ -52,7 +64,7 @@ CIDR="$(jq -r .primary_net_cidr "${META}")"
 INTERNAL_IP="$(jq -r .director_private_ip "${META}")"
 KEY_NAME="$(jq -r .default_key_name "${META}")"
 
-echo "Deploying BOSH director (create-env)..."
+echo "Deploying BOSH director at ${INTERNAL_IP} (create-env)..."
 bosh create-env "${BOSH_DEPLOYMENT}/bosh.yml" \
   --state "${DEP}/state.json" \
   --vars-store "${DEP}/credentials.yml" \
@@ -62,6 +74,7 @@ bosh create-env "${BOSH_DEPLOYMENT}/bosh.yml" \
   -o "${DEP}/ops_local_cpi.yml" \
   -o "${DEP}/ops_local_stemcell.yml" \
   -o "${DEP}/ops_flavor.yml" \
+  -o "${DEP}/ops_internal_only.yml" \
   -v director_name=bosh \
   -v internal_ip="${INTERNAL_IP}" \
   -v internal_gw="${GW}" \
@@ -77,11 +90,13 @@ bosh create-env "${BOSH_DEPLOYMENT}/bosh.yml" \
   -v region=RegionOne \
   -v az=nova
 
-echo "Verifying director..."
-export BOSH_ENVIRONMENT="${INTERNAL_IP}"
+echo "Verifying director at ${INTERNAL_IP}..."
+BOSH_ENVIRONMENT="${INTERNAL_IP}"
+export BOSH_ENVIRONMENT
 export BOSH_CLIENT=admin
 BOSH_CLIENT_SECRET="$(bosh int "${DEP}/credentials.yml" --path /admin_password)"
 echo "::add-mask::${BOSH_CLIENT_SECRET}"
 export BOSH_CLIENT_SECRET
-export BOSH_CA_CERT="$(bosh int "${DEP}/credentials.yml" --path /director_ssl/ca)"
+BOSH_CA_CERT="$(bosh int "${DEP}/credentials.yml" --path /director_ssl/ca)"
+export BOSH_CA_CERT
 bosh -n env

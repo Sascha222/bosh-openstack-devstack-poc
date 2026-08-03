@@ -3,17 +3,19 @@
 # Boot one VM through the freshly-deployed BOSH director, to exercise the full
 # director-driven create_stemcell + create_vm path. Reads director creds from
 # the create-env vars-store and network facts from terraform-cpi/metadata.
-set -euo pipefail
+set -euxo pipefail
 
 DIR=bosh-director-deployment
 META=terraform-cpi/metadata
 
-export BOSH_ENVIRONMENT="$(jq -r .director_public_ip "${META}")"
+BOSH_ENVIRONMENT="$(jq -r .director_public_ip "${META}")"
+export BOSH_ENVIRONMENT
 export BOSH_CLIENT=admin
 BOSH_CLIENT_SECRET="$(bosh int "${DIR}/credentials.yml" --path /admin_password)"
 echo "::add-mask::${BOSH_CLIENT_SECRET}"
 export BOSH_CLIENT_SECRET
-export BOSH_CA_CERT="$(bosh int "${DIR}/credentials.yml" --path /director_ssl/ca)"
+BOSH_CA_CERT="$(bosh int "${DIR}/credentials.yml" --path /director_ssl/ca)"
+export BOSH_CA_CERT
 
 bosh -n env
 
