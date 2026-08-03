@@ -232,6 +232,23 @@ jobs:
           openstack flavor show no-root-disk >/dev/null 2>&1 || \
             openstack flavor create --ram 1024 --disk 0 --vcpus 1 no-root-disk
 
+      - name: Register volumev3 catalog alias for Cinder
+        run: |
+          # Modern DevStack registers Cinder as service type 'block-storage',
+          # but the CPI's fog-openstack 1.1.5 searches the catalog for
+          # 'volumev3'/'volumev2'/'volume' -> "No endpoint match" on create_disk.
+          # Alias the existing v3 volume endpoint under the type fog expects.
+          VOL_URL=$(openstack endpoint list --service block-storage \
+            --interface public -f value -c URL | head -1)
+          echo "cinder public URL: ${VOL_URL}"
+          if ! openstack service show volumev3 >/dev/null 2>&1; then
+            openstack service create --name cinderv3 volumev3
+          fi
+          for iface in public internal admin; do
+            openstack endpoint create volumev3 "$iface" "$VOL_URL" --region RegionOne || true
+          done
+          openstack endpoint list --service volumev3
+
       - name: Setup Ruby
         uses: ruby/setup-ruby@v1
         with:
@@ -421,15 +438,24 @@ jobs:
             -subj "/CN=devstack-dummy-ca" -days 3650
           # deploy-manual-networking.sh expects this output dir to exist
           mkdir -p bosh-director-deployment
+          # The upstream script uses `set -ex` (echoes expanded vars) and
+          # `| tee bosh.yml` (prints the fully-interpolated manifest, including
+          # the jumpbox private key). Patch both out so secrets stay out of logs.
+          sed -i -E -e 's/^set -ex$/set -e/' \
+                    -e 's/^set -e -x$/set -e/' \
+                    -e 's/\| tee bosh.yml/> bosh.yml/' \
+                 bosh-openstack-cpi-release/ci/tasks/deploy-manual-networking.sh
           bash bosh-openstack-cpi-release/ci/tasks/deploy-manual-networking.sh
 
       - name: Boot a VM through the director
         run: |
-          set -eux
+          set -eu
           DIR=bosh-director-deployment
           export BOSH_ENVIRONMENT=$(jq -r .director_public_ip terraform-cpi/metadata)
           export BOSH_CLIENT=admin
-          export BOSH_CLIENT_SECRET=$(bosh int "$DIR/credentials.yml" --path /admin_password)
+          BOSH_CLIENT_SECRET=$(bosh int "$DIR/credentials.yml" --path /admin_password)
+          echo "::add-mask::${BOSH_CLIENT_SECRET}"
+          export BOSH_CLIENT_SECRET
           export BOSH_CA_CERT="$(bosh int "$DIR/credentials.yml" --path /director_ssl/ca)"
           bosh -n env
 
@@ -488,5 +514,7 @@ jobs:
           name: director-vm-logs
           path: |
             /tmp/devstack-logs/
-            bosh-director-deployment/
+            bosh-director-deployment/*.json
+          # NOTE: deliberately NOT uploading credentials.yml / bosh.yml — they
+          # contain generated director secrets and the jumpbox private key.
           retention-days: 7

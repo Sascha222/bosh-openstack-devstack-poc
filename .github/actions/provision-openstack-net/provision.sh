@@ -125,7 +125,7 @@ elif [ "$TOPOLOGY" = "bats" ]; then
   "secondary_net_manual_ip": "10.0.5.4",
   "secondary_net_static_range": "10.0.5.4-10.0.5.100",
   "secondary_net_dhcp_pool": "10.0.5.200-10.0.5.254",
-  "dns": "${DNS_NS}",
+  "dns": ["${DNS_NS}"],
   "openstack_project": "${PROJECT}",
   "default_key_name": "${KEY_NAME}",
   "security_group": "${SG_NAME}"
