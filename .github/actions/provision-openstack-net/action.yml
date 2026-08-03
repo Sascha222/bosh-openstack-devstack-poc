@@ -5,6 +5,9 @@ description: >-
   openstack CLI, and write metadata.json in the shape run-lifecycle.sh expects.
 
 inputs:
+  topology:
+    description: Which topology to provision (lifecycle|bats)
+    default: lifecycle
   prefix:
     description: Name prefix for all created resources
     default: lifecycle
@@ -26,6 +29,7 @@ runs:
     - name: Provision network
       shell: bash
       env:
+        TOPOLOGY: ${{ inputs.topology }}
         PREFIX: ${{ inputs.prefix }}
         EXT_NET: ${{ inputs.external_network }}
         OUT: ${{ inputs.output }}

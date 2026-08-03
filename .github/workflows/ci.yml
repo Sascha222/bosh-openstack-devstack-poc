@@ -7,6 +7,10 @@ on:
         description: Run the (slow) real CPI lifecycle job
         type: boolean
         default: true
+      run_director_vm:
+        description: Deploy a real BOSH director and boot a VM through it (very slow)
+        type: boolean
+        default: false
   pull_request:
   push:
     branches: [ main, master ]
@@ -256,12 +260,13 @@ jobs:
           BOSH_OPENSTACK_WRITE_TIMEOUT: "180"
           BOSH_OPENSTACK_FLAVOR_WITH_NO_ROOT_DISK: no-root-disk
           BOSH_OPENSTACK_EXCLUDE_CINDER_V1: "true"
+          # DevStack's default Cinder volume type (required by the specs).
+          BOSH_OPENSTACK_VOLUME_TYPE: lvmdriver-1
           # Optional vars the script references bare under `set -u`; bind empty.
           BOSH_OPENSTACK_AUTH_URL_V2: ""
           BOSH_OPENSTACK_USERNAME_V2: ""
           BOSH_OPENSTACK_API_KEY_V2: ""
           BOSH_OPENSTACK_CA_CERT: ""
-          BOSH_OPENSTACK_VOLUME_TYPE: ""
         run: |
           mkdir -p output
           bash bosh-openstack-cpi-release/ci/tasks/run-lifecycle.sh
@@ -274,4 +279,188 @@ jobs:
           path: |
             /tmp/devstack-logs/
             output/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # BATS: deploy a REAL BOSH director via create-env, then run the BOSH
+  # Acceptance Tests through it. Mirrors upstream bats-ubuntu-manual. Slow and
+  # ---------------------------------------------------------------------------
+  # Deploy a REAL BOSH director via create-env, then use that director to
+  # upload a stemcell and boot one VM through the CPI. This proves the full
+  # director-driven create_vm path (not just the direct-CPI lifecycle specs).
+  # Runs under QEMU on standard runners. Manual dispatch only.
+  # ---------------------------------------------------------------------------
+  director-vm:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_director_vm }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    needs: [ unit-specs ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout CPI release
+        uses: actions/checkout@v4
+        with:
+          repository: cloudfoundry/bosh-openstack-cpi-release
+          path: bosh-openstack-cpi-release
+
+      - name: Checkout bosh-deployment
+        uses: actions/checkout@v4
+        with:
+          repository: cloudfoundry/bosh-deployment
+          path: bosh-deployment
+
+      - uses: ./.github/actions/setup-devstack
+
+      - name: Fix Glance for large HTTP uploads
+        run: |
+          sudo crudini --set /etc/glance/glance-api.conf glance_store filesystem_store_datadir /opt/stack/data/glance/images
+          sudo crudini --set /etc/glance/glance-api.conf DEFAULT workers 4
+          sudo crudini --set /etc/glance/glance-api.conf DEFAULT client_socket_timeout 3600
+          sudo crudini --set /etc/glance/glance-api.conf DEFAULT send_timeout 3600
+          sudo systemctl restart devstack@g-api || sudo systemctl restart 'devstack@g-*' || true
+          sleep 20
+
+      - name: Neutralize KVM/QEMU image mismatch
+        run: |
+          sudo crudini --set /etc/nova/nova-cpu.conf libvirt virt_type qemu
+          sudo crudini --set /etc/nova/nova-cpu.conf libvirt cpu_mode none
+          CUR=$(sudo crudini --get /etc/nova/nova.conf filter_scheduler enabled_filters 2>/dev/null || echo "")
+          if [ -n "$CUR" ]; then
+            NEW=$(echo "$CUR" | sed -E 's/,?ImagePropertiesFilter//g')
+            sudo crudini --set /etc/nova/nova.conf filter_scheduler enabled_filters "$NEW"
+          fi
+          sudo systemctl restart devstack@n-cpu || true
+          sudo systemctl restart devstack@n-sch || true
+          sleep 20
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.1.7"
+
+      - name: Install BOSH CLI (as bosh-go)
+        run: |
+          wget -q "https://github.com/cloudfoundry/bosh-cli/releases/download/v7.7.2/bosh-cli-7.7.2-linux-amd64" -O /tmp/bosh
+          sudo install -m0755 /tmp/bosh /usr/local/bin/bosh
+          sudo install -m0755 /tmp/bosh /usr/local/bin/bosh-go
+
+      - name: Download jammy stemcell
+        run: |
+          mkdir -p stemcell-director
+          wget -q "https://bosh.io/d/stemcells/bosh-openstack-kvm-ubuntu-jammy-go_agent" \
+            -O stemcell-director/stemcell.tgz
+          tar -Oxzf stemcell-director/stemcell.tgz stemcell.MF \
+            | awk '/^version:/{gsub(/['"'"'"]/,"",$2); print $2}' > stemcell-director/version
+          echo "stemcell version: $(cat stemcell-director/version)"
+
+      - name: Download BOSH release
+        run: |
+          mkdir -p bosh-release
+          wget -q "https://bosh.io/d/github.com/cloudfoundry/bosh" -O bosh-release/bosh-release.tgz
+          tar -Oxzf bosh-release/bosh-release.tgz release.MF \
+            | awk '/^version:/{gsub(/['"'"'"]/,"",$2); print $2}' > bosh-release/version
+          echo "bosh release version: $(cat bosh-release/version)"
+
+      - name: Provision bats network
+        uses: ./.github/actions/provision-openstack-net
+        with:
+          topology: bats
+          prefix: bats
+          external_network: public
+          output: terraform-cpi/metadata
+
+      - name: Route runner into tenant subnet
+        run: |
+          set -eux
+          # Everything is on one host; reach the director's private IP via the
+          # router's external-gateway IP on br-ex instead of a floating IP.
+          GW=$(jq -r .router_ext_gw_ip terraform-cpi/metadata)
+          sudo ip route replace 10.0.4.0/24 via "$GW"
+          sudo ip route replace 10.0.5.0/24 via "$GW"
+          ip route get 10.0.4.3
+
+      - name: Deploy BOSH director (create-env)
+        env:
+          openstack_flavor: m1.small
+          openstack_connection_timeout: "600"
+          openstack_read_timeout: "180"
+          openstack_write_timeout: "180"
+          openstack_state_timeout: "900"
+          openstack_auth_url: ${{ env.OS_AUTH_URL }}
+          openstack_username: admin
+          openstack_api_key: secret
+          openstack_domain: Default
+          distro: ubuntu
+          availability_zone: "null"
+          openstack_ca_file_path: /opt/stack/data/ca-bundle.pem
+          DEBUG_BATS: "true"
+        run: bash bosh-openstack-cpi-release/ci/tasks/deploy-manual-networking.sh
+
+      - name: Boot a VM through the director
+        run: |
+          set -eux
+          DIR=bosh-director-deployment
+          export BOSH_ENVIRONMENT=$(jq -r .director_public_ip terraform-cpi/metadata)
+          export BOSH_CLIENT=admin
+          export BOSH_CLIENT_SECRET=$(bosh int "$DIR/credentials.yml" --path /admin_password)
+          export BOSH_CA_CERT="$(bosh int "$DIR/credentials.yml" --path /director_ssl/ca)"
+          bosh -n env
+
+          # Upload the stemcell VIA the director/CPI (real create_stemcell path)
+          bosh -n upload-stemcell stemcell-director/stemcell.tgz
+
+          # Minimal cloud-config matching the provisioned primary network
+          NET_ID=$(jq -r .primary_net_id terraform-cpi/metadata)
+          SG=$(jq -r .security_group terraform-cpi/metadata)
+          cat > cloud-config.yml <<EOF
+          azs: [{name: z1}]
+          vm_types: [{name: default, cloud_properties: {instance_type: m1.small}}]
+          disk_types: [{name: default, disk_size: 3000}]
+          compilation: {workers: 1, az: z1, vm_type: default, network: private, reuse_compilation_vms: true}
+          networks:
+          - name: private
+            type: manual
+            subnets:
+            - range: 10.0.4.0/24
+              gateway: 10.0.4.1
+              azs: [z1]
+              dns: [8.8.8.8]
+              reserved: [10.0.4.2-10.0.4.10]
+              static: [10.0.4.20-10.0.4.30]
+              cloud_properties: {net_id: ${NET_ID}, security_groups: [${SG}]}
+          EOF
+          bosh -n update-cloud-config cloud-config.yml
+
+          # Deploy one instance that just runs the stemcell (errand-free)
+          cat > manifest.yml <<EOF
+          name: smoke
+          stemcells: [{alias: default, os: ubuntu-jammy, version: latest}]
+          releases: []
+          instance_groups:
+          - name: nothing
+            instances: 1
+            azs: [z1]
+            vm_type: default
+            stemcell: default
+            networks: [{name: private, default: [dns, gateway]}]
+            jobs: []
+          update: {canaries: 1, max_in_flight: 1, canary_watch_time: 30000-600000, update_watch_time: 30000-600000}
+          EOF
+          bosh -n -d smoke deploy manifest.yml
+          bosh -d smoke instances --details
+          bosh -n -d smoke delete-deployment
+
+      - name: Teardown director
+        if: always()
+        run: bash bosh-openstack-cpi-release/ci/tasks/teardown-director.sh || true
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: director-vm-logs
+          path: |
+            /tmp/devstack-logs/
+            bosh-director-deployment/
           retention-days: 7

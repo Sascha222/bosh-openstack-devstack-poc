@@ -1,28 +1,29 @@
 #!/usr/bin/env bash
-# Provision the lifecycle-test network topology on DevStack using the openstack
-# CLI, replacing the upstream terraform modules/lifecycle. Emits metadata.json
-# with the exact keys that ci/tasks/run-lifecycle.sh reads via jq.
+# Provision test network topology on DevStack using the openstack CLI,
+# replacing the upstream terraform modules. Emits metadata.json with the exact
+# keys the consuming scripts read via jq.
 #
-# Mirrors bosh-openstack-cpi-release/ci/terraform/ci/modules/{base,lifecycle}.
+# TOPOLOGY=lifecycle -> mirrors terraform modules/{base,lifecycle}
+#                       (consumed by ci/tasks/run-lifecycle.sh)
+# TOPOLOGY=bats      -> mirrors terraform modules/{base,bats} + bats-manual root
+#                       (consumed by deploy-manual-networking.sh + run-manual-networking-bats.sh)
 set -euo pipefail
 
-PREFIX="${PREFIX:-lifecycle}"
+TOPOLOGY="${TOPOLOGY:-lifecycle}"
+PREFIX="${PREFIX:-$TOPOLOGY}"
 EXT_NET="${EXT_NET:-public}"
 DNS_NS="${DNS_NS:-8.8.8.8}"
 PUBKEY_FILE="${PUBKEY_FILE:-$HOME/.ssh/id_rsa.pub}"
 OUT="${OUT:-metadata.json}"
 mkdir -p "$(dirname "$OUT")"
 
-# Networks (match modules/lifecycle CIDRs)
-MAIN_CIDR="10.0.1.0/24";  MAIN_GW="10.0.1.1";  MAIN_MANUAL_IP="10.0.1.3"
-NODHCP1_CIDR="10.1.1.0/24"; NODHCP1_GW="10.1.1.1"; NODHCP1_MANUAL_IP="10.1.1.3"
-NODHCP2_CIDR="10.2.1.0/24"; NODHCP2_GW="10.2.1.1"; NODHCP2_MANUAL_IP="10.2.1.3"
-
 PROJECT="${OS_PROJECT_NAME:-admin}"
 KEY_NAME="${PREFIX}-${PROJECT}"
 
 id_of() { openstack "$1" show "$2" -f value -c id; }
+port_ip() { openstack port show "$1" -f json | jq -r '.fixed_ips[0].ip_address // empty' ; }
 
+# --- shared base: keypair, security group, router ---------------------------
 echo "=== keypair ${KEY_NAME} ==="
 if [ ! -f "$PUBKEY_FILE" ]; then
   ssh-keygen -t rsa -b 2048 -N "" -f "${PUBKEY_FILE%.pub}"
@@ -31,20 +32,19 @@ openstack keypair create --public-key "$PUBKEY_FILE" "$KEY_NAME" >/dev/null 2>&1
   echo "keypair ${KEY_NAME} already exists"
 
 echo "=== security group ${PREFIX} ==="
-openstack security group create "$PREFIX" --description "cpi lifecycle tests" >/dev/null 2>&1 || true
+openstack security group create "$PREFIX" --description "cpi ${TOPOLOGY} tests" >/dev/null 2>&1 || true
 SG_ID=$(id_of "security group" "$PREFIX")
 SG_NAME="$PREFIX"
 
-# intra-SG allow (tcp/udp/icmp), then SSH + BOSH agent/nats + DNS from anywhere
 add_rule() { openstack security group rule create "$@" "$SG_ID" >/dev/null 2>&1 || true; }
 add_rule --protocol tcp  --remote-group "$SG_ID"
 add_rule --protocol udp  --remote-group "$SG_ID"
 add_rule --protocol icmp --remote-group "$SG_ID"
-add_rule --protocol tcp  --dst-port 22:22    --remote-ip 0.0.0.0/0
+add_rule --protocol tcp  --dst-port 22:22       --remote-ip 0.0.0.0/0
 add_rule --protocol tcp  --dst-port 25555:25555 --remote-ip 0.0.0.0/0
-add_rule --protocol tcp  --dst-port 6868:6868 --remote-ip 0.0.0.0/0
-add_rule --protocol udp  --dst-port 53:53     --remote-ip 0.0.0.0/0
-add_rule --protocol tcp  --dst-port 53:53     --remote-ip 0.0.0.0/0
+add_rule --protocol tcp  --dst-port 6868:6868   --remote-ip 0.0.0.0/0
+add_rule --protocol udp  --dst-port 53:53       --remote-ip 0.0.0.0/0
+add_rule --protocol tcp  --dst-port 53:53       --remote-ip 0.0.0.0/0
 
 echo "=== router ${PREFIX}-router (ext gw ${EXT_NET}) ==="
 openstack router create "${PREFIX}-router" >/dev/null 2>&1 || true
@@ -63,28 +63,28 @@ make_net() {
   id_of network "$name"
 }
 
-echo "=== networks ==="
-NET_ID=$(make_net "${PREFIX}"           "$MAIN_CIDR"    "$MAIN_GW"    yes yes)
-NET_ID_ND1=$(make_net "${PREFIX}-no-dhcp-1" "$NODHCP1_CIDR" "$NODHCP1_GW" no  no)
-NET_ID_ND2=$(make_net "${PREFIX}-no-dhcp-2" "$NODHCP2_CIDR" "$NODHCP2_GW" no  no)
+if [ "$TOPOLOGY" = "lifecycle" ]; then
+  # --- lifecycle topology (modules/lifecycle) -------------------------------
+  echo "=== networks (lifecycle) ==="
+  NET_ID=$(make_net     "${PREFIX}"            "10.0.1.0/24" "10.0.1.1" yes yes)
+  NET_ID_ND1=$(make_net "${PREFIX}-no-dhcp-1"  "10.1.1.0/24" "10.1.1.1" no  no)
+  NET_ID_ND2=$(make_net "${PREFIX}-no-dhcp-2"  "10.2.1.0/24" "10.2.1.1" no  no)
 
-echo "=== allowed-address-pairs port ==="
-openstack port create --network "${PREFIX}" "${PREFIX}-aap" >/dev/null 2>&1 || true
-AAP_IP=$(openstack port show "${PREFIX}-aap" -f json \
-  | jq -r '.fixed_ips[0].ip_address // .fixed_ips' | sed -E "s/.*ip_address='([^']+)'.*/\1/")
+  echo "=== allowed-address-pairs port ==="
+  openstack port create --network "${PREFIX}" "${PREFIX}-aap" >/dev/null 2>&1 || true
+  AAP_IP=$(port_ip "${PREFIX}-aap")
 
-echo "=== floating ip ==="
-FLOATING_IP=$(openstack floating ip create "$EXT_NET" -f value -c floating_ip_address)
+  FLOATING_IP=$(openstack floating ip create "$EXT_NET" -f value -c floating_ip_address)
 
-cat > "$OUT" <<JSON
+  cat > "$OUT" <<JSON
 {
   "net_id": "${NET_ID}",
-  "manual_ip": "${MAIN_MANUAL_IP}",
+  "manual_ip": "10.0.1.3",
   "allowed_address_pairs": "${AAP_IP}",
   "net_id_no_dhcp_1": "${NET_ID_ND1}",
-  "no_dhcp_manual_ip_1": "${NODHCP1_MANUAL_IP}",
+  "no_dhcp_manual_ip_1": "10.1.1.3",
   "net_id_no_dhcp_2": "${NET_ID_ND2}",
-  "no_dhcp_manual_ip_2": "${NODHCP2_MANUAL_IP}",
+  "no_dhcp_manual_ip_2": "10.2.1.3",
   "default_key_name": "${KEY_NAME}",
   "floating_ip": "${FLOATING_IP}",
   "security_group_id": "${SG_ID}",
@@ -93,5 +93,48 @@ cat > "$OUT" <<JSON
 }
 JSON
 
-echo "=== metadata.json ==="
+elif [ "$TOPOLOGY" = "bats" ]; then
+  # --- bats topology (modules/bats + bats-manual root) ----------------------
+  # primary 10.0.4.0/24 (dhcp), secondary 10.0.5.0/24 (dhcp).
+  # Everything runs on one host: instead of floating IPs, the director keeps
+  # its private IP and the runner reaches the tenant subnet via a host route
+  # through the router's external-gateway IP (emitted as router_ext_gw_ip).
+  echo "=== networks (bats) ==="
+  PRIMARY_ID=$(make_net   "${PREFIX}-primary"   "10.0.4.0/24" "10.0.4.1" yes yes)
+  SECONDARY_ID=$(make_net "${PREFIX}-secondary" "10.0.5.0/24" "10.0.5.1" yes yes)
+
+  ROUTER_EXT_GW_IP=$(openstack router show "${PREFIX}-router" -f json \
+    | jq -r '.external_gateway_info.external_fixed_ips[0].ip_address')
+
+  cat > "$OUT" <<JSON
+{
+  "director_public_ip": "10.0.4.3",
+  "director_private_ip": "10.0.4.3",
+  "router_ext_gw_ip": "${ROUTER_EXT_GW_IP}",
+  "floating_ip": "10.0.4.6",
+  "primary_net_id": "${PRIMARY_ID}",
+  "primary_net_cidr": "10.0.4.0/24",
+  "primary_net_gateway": "10.0.4.1",
+  "primary_net_manual_ip": "10.0.4.4",
+  "primary_net_second_manual_ip": "10.0.4.5",
+  "primary_net_static_range": "10.0.4.4-10.0.4.100",
+  "primary_net_dhcp_pool": "10.0.4.200-10.0.4.254",
+  "secondary_net_id": "${SECONDARY_ID}",
+  "secondary_net_cidr": "10.0.5.0/24",
+  "secondary_net_gateway": "10.0.5.1",
+  "secondary_net_manual_ip": "10.0.5.4",
+  "secondary_net_static_range": "10.0.5.4-10.0.5.100",
+  "secondary_net_dhcp_pool": "10.0.5.200-10.0.5.254",
+  "dns": "${DNS_NS}",
+  "openstack_project": "${PROJECT}",
+  "default_key_name": "${KEY_NAME}",
+  "security_group": "${SG_NAME}"
+}
+JSON
+
+else
+  echo "::error::unknown TOPOLOGY '${TOPOLOGY}' (expected lifecycle|bats)"; exit 1
+fi
+
+echo "=== ${OUT} ==="
 cat "$OUT"
