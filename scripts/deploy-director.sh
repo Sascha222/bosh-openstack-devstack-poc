@@ -66,7 +66,7 @@ bosh create-env "${BOSH_DEPLOYMENT}/bosh.yml" \
   -v openstack_domain=Default \
   -v openstack_project=admin \
   -v region=RegionOne \
-  -v az=z1
+  -v az=nova
 
 echo "Verifying director..."
 export BOSH_ENVIRONMENT="${INTERNAL_IP}"
