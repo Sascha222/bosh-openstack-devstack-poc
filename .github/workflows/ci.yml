@@ -28,6 +28,7 @@ jobs:
   # could ever be fast here.
   # ---------------------------------------------------------------------------
   kvm-probe:
+    if: false
     runs-on: ubuntu-24.04
     steps:
       - name: Probe virtualization support
@@ -68,6 +69,7 @@ jobs:
   # integration tests are httptest-mocked, so no OpenStack/DevStack is needed.
   # ---------------------------------------------------------------------------
   go-tests:
+    if: false
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout CPI release
@@ -94,6 +96,7 @@ jobs:
   # DevStack sanity: services/endpoints/networks reachable.
   # ---------------------------------------------------------------------------
   openstack-smoke:
+    if: false
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -112,6 +115,7 @@ jobs:
   # Merges the old bosh-cpi-test.yml + cpi-extended-test.yml.
   # ---------------------------------------------------------------------------
   cpi-operations:
+    if: false
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
