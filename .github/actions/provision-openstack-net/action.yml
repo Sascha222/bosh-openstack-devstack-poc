@@ -1,0 +1,32 @@
+name: Provision OpenStack lifecycle network
+description: >-
+  Create the lifecycle-test network topology (router, keypair, security group,
+  networks/subnets, allowed-address-pair port, floating IP) on DevStack via the
+  openstack CLI, and write metadata.json in the shape run-lifecycle.sh expects.
+
+inputs:
+  prefix:
+    description: Name prefix for all created resources
+    default: lifecycle
+  external_network:
+    description: External network for router gateway and floating IPs
+    default: public
+  output:
+    description: Path to write the metadata JSON
+    default: metadata.json
+
+outputs:
+  metadata_file:
+    description: Path to the written metadata JSON
+    value: ${{ inputs.output }}
+
+runs:
+  using: composite
+  steps:
+    - name: Provision network
+      shell: bash
+      env:
+        PREFIX: ${{ inputs.prefix }}
+        EXT_NET: ${{ inputs.external_network }}
+        OUT: ${{ inputs.output }}
+      run: bash "${GITHUB_ACTION_PATH}/provision.sh"

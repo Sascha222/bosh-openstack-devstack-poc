@@ -1,0 +1,271 @@
+name: CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_lifecycle:
+        description: Run the (slow) real CPI lifecycle job
+        type: boolean
+        default: true
+  pull_request:
+  push:
+    branches: [ main, master ]
+
+# Pin the versions the upstream CPI CI image uses.
+env:
+  RUBY_VERSION: "3.1.7"
+  BOSH_CLI_VERSION: "7.7.2"
+  CPI_REPO: cloudfoundry/bosh-openstack-cpi-release
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Informational: does this runner expose usable KVM? Lifecycle does not
+  # depend on this (it runs under QEMU), but the answer decides whether BATS
+  # could ever be fast here.
+  # ---------------------------------------------------------------------------
+  kvm-probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Probe virtualization support
+        run: |
+          echo "=== /dev/kvm ==="
+          if [ -e /dev/kvm ]; then echo "present"; ls -la /dev/kvm; else echo "ABSENT"; fi
+          echo "=== CPU virt flags ==="
+          grep -oE '(vmx|svm)' /proc/cpuinfo | sort -u || echo "none"
+          echo "=== modprobe kvm ==="
+          sudo modprobe kvm 2>&1 || echo "modprobe kvm failed"
+          sudo modprobe kvm-intel 2>/dev/null || sudo modprobe kvm-amd 2>/dev/null || true
+          lsmod | grep kvm || echo "kvm module not loaded"
+
+  # ---------------------------------------------------------------------------
+  # CPI Ruby unit specs + rubocop. No OpenStack needed.
+  # ---------------------------------------------------------------------------
+  unit-specs:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout CPI release
+        uses: actions/checkout@v4
+        with:
+          repository: cloudfoundry/bosh-openstack-cpi-release
+          path: cpi-release
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.1.7"
+      - name: Unit specs + rubocop
+        working-directory: cpi-release/src/bosh_openstack_cpi
+        run: |
+          bundle install
+          bundle exec rake rubocop
+          bundle exec rake spec:unit
+
+  # ---------------------------------------------------------------------------
+  # DevStack sanity: services/endpoints/networks reachable.
+  # ---------------------------------------------------------------------------
+  openstack-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-devstack
+      - name: Inspect OpenStack
+        run: |
+          openstack network list
+          openstack flavor list
+          openstack image list
+          openstack hypervisor stats show || true
+      - name: Upload DevStack logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devstack-logs-smoke
+          path: /tmp/devstack-logs/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # CPI operations against DevStack using a tiny Cirros image (proven path):
+  # security groups, custom network, VM create, volume attach/detach.
+  # Merges the old bosh-cpi-test.yml + cpi-extended-test.yml.
+  # ---------------------------------------------------------------------------
+  cpi-operations:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-devstack
+
+      - name: Upload Cirros image
+        run: |
+          wget -q https://download.cirros-cloud.net/0.6.2/cirros-0.6.2-x86_64-disk.img -O cirros.img
+          openstack image create --disk-format qcow2 --container-format bare \
+            --public --file cirros.img cirros-test
+          openstack image show cirros-test
+
+      - name: Test - security group
+        id: secgroup
+        run: |
+          openstack security group create --description "cpi test" cpi-test-sg
+          openstack security group rule create --protocol tcp --dst-port 22:22 --remote-ip 0.0.0.0/0 cpi-test-sg
+          openstack security group rule create --protocol icmp cpi-test-sg
+          openstack security group rule list cpi-test-sg
+
+      - name: Test - custom network
+        id: network
+        run: |
+          openstack network create cpi-test-network
+          openstack subnet create --network cpi-test-network \
+            --subnet-range 192.168.100.0/24 --dns-nameserver 8.8.8.8 cpi-test-subnet
+          openstack network show cpi-test-network
+
+      - name: Test - VM create
+        id: vm
+        run: |
+          openstack server create --flavor m1.tiny --image cirros-test \
+            --network cpi-test-network --security-group cpi-test-sg test-vm
+          for i in $(seq 1 60); do
+            STATUS=$(openstack server show test-vm -f value -c status)
+            echo "attempt $i: $STATUS"
+            [ "$STATUS" = "ACTIVE" ] && break
+            if [ "$STATUS" = "ERROR" ]; then openstack server show test-vm; exit 1; fi
+            sleep 5
+          done
+          openstack server show test-vm
+
+      - name: Test - volume attach/detach
+        id: volume
+        run: |
+          openstack volume create --size 1 test-volume
+          for i in $(seq 1 30); do
+            S=$(openstack volume show test-volume -f value -c status)
+            [ "$S" = "available" ] && break
+            [ "$S" = "error" ] && { openstack volume show test-volume; exit 1; }
+            sleep 2
+          done
+          openstack server add volume test-vm test-volume
+          sleep 10
+          [ "$(openstack volume show test-volume -f value -c status)" = "in-use" ] || { openstack volume show test-volume; exit 1; }
+          openstack server remove volume test-vm test-volume
+          sleep 10
+          [ "$(openstack volume show test-volume -f value -c status)" = "available" ] || { openstack volume show test-volume; exit 1; }
+
+      - name: Cleanup
+        if: always()
+        run: |
+          openstack server delete test-vm || true
+          sleep 5
+          openstack volume delete test-volume || true
+          openstack subnet delete cpi-test-subnet || true
+          openstack network delete cpi-test-network || true
+          openstack security group delete cpi-test-sg || true
+          openstack image delete cirros-test || true
+
+      - name: Upload DevStack logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devstack-logs-cpi-ops
+          path: /tmp/devstack-logs/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # THE REAL TEST: build the actual CPI dev release and run its rspec
+  # integration ("lifecycle") specs against DevStack. Runs under QEMU; we
+  # neutralize the KVM/QEMU image mismatch and fix Glance large uploads.
+  # ---------------------------------------------------------------------------
+  cpi-lifecycle:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_lifecycle }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    needs: [ unit-specs ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout CPI release
+        uses: actions/checkout@v4
+        with:
+          repository: cloudfoundry/bosh-openstack-cpi-release
+          path: bosh-openstack-cpi-release
+
+      - uses: ./.github/actions/setup-devstack
+
+      - name: Fix Glance for large HTTP uploads
+        run: |
+          # POC Problem 8: trailing slash makes file:// URLs malformed; also the
+          # single eventlet worker + short timeouts kill ~1.3GB uploads.
+          sudo crudini --set /etc/glance/glance-api.conf glance_store filesystem_store_datadir /opt/stack/data/glance/images
+          sudo crudini --set /etc/glance/glance-api.conf DEFAULT workers 4
+          sudo crudini --set /etc/glance/glance-api.conf DEFAULT client_socket_timeout 3600
+          sudo crudini --set /etc/glance/glance-api.conf DEFAULT send_timeout 3600
+          sudo systemctl restart devstack@g-api || sudo systemctl restart 'devstack@g-*' || true
+          sleep 20
+
+      - name: Neutralize KVM/QEMU image mismatch
+        run: |
+          # DevStack on a standard runner is QEMU. Make Nova accept images and
+          # skip the hypervisor_type image-properties check.
+          sudo crudini --set /etc/nova/nova-cpu.conf libvirt virt_type qemu
+          sudo crudini --set /etc/nova/nova-cpu.conf libvirt cpu_mode none
+          CUR=$(sudo crudini --get /etc/nova/nova.conf filter_scheduler enabled_filters 2>/dev/null || echo "")
+          if [ -n "$CUR" ]; then
+            NEW=$(echo "$CUR" | sed -E 's/,?ImagePropertiesFilter//g')
+            sudo crudini --set /etc/nova/nova.conf filter_scheduler enabled_filters "$NEW"
+          fi
+          sudo systemctl restart devstack@n-cpu || true
+          sudo systemctl restart devstack@n-sch || true
+          sleep 20
+
+      - name: Create flavor with no root disk
+        run: |
+          openstack flavor show no-root-disk >/dev/null 2>&1 || \
+            openstack flavor create --ram 1024 --disk 0 --vcpus 1 no-root-disk
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.1.7"
+
+      - name: Install BOSH CLI
+        run: |
+          wget -q "https://github.com/cloudfoundry/bosh-cli/releases/download/v7.7.2/bosh-cli-7.7.2-linux-amd64" -O /tmp/bosh
+          sudo install -m0755 /tmp/bosh /usr/local/bin/bosh
+
+      - name: Download jammy stemcell
+        run: |
+          mkdir -p openstack-lifecycle-stemcell
+          wget -q "https://bosh.io/d/stemcells/bosh-openstack-kvm-ubuntu-jammy-go_agent" \
+            -O openstack-lifecycle-stemcell/stemcell.tgz
+          ls -lh openstack-lifecycle-stemcell/stemcell.tgz
+
+      - name: Provision lifecycle network
+        uses: ./.github/actions/provision-openstack-net
+        with:
+          prefix: lifecycle
+          external_network: public
+          output: terraform-cpi/metadata
+
+      - name: Run lifecycle integration specs
+        env:
+          BOSH_OPENSTACK_DOMAIN: Default
+          BOSH_OPENSTACK_PROJECT: admin
+          BOSH_OPENSTACK_AUTH_URL_V3: ${{ env.OS_AUTH_URL }}
+          BOSH_OPENSTACK_USERNAME_V3: admin
+          BOSH_OPENSTACK_API_KEY_V3: secret
+          BOSH_CLI_SILENCE_SLOW_LOAD_WARNING: "true"
+          BOSH_OPENSTACK_CONNECT_TIMEOUT: "600"
+          BOSH_OPENSTACK_READ_TIMEOUT: "180"
+          BOSH_OPENSTACK_WRITE_TIMEOUT: "180"
+          BOSH_OPENSTACK_FLAVOR_WITH_NO_ROOT_DISK: no-root-disk
+          BOSH_OPENSTACK_EXCLUDE_CINDER_V1: "true"
+        run: |
+          mkdir -p output
+          bash bosh-openstack-cpi-release/ci/tasks/run-lifecycle.sh
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpi-lifecycle-logs
+          path: |
+            /tmp/devstack-logs/
+            output/
+          retention-days: 7
