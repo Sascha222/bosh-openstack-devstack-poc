@@ -64,6 +64,33 @@ jobs:
           bundle exec rake spec:unit
 
   # ---------------------------------------------------------------------------
+  # Go CPI unit + integration specs + lint. Mirrors upstream's go.yml. The Go
+  # integration tests are httptest-mocked, so no OpenStack/DevStack is needed.
+  # ---------------------------------------------------------------------------
+  go-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout CPI release
+        uses: actions/checkout@v4
+        with:
+          repository: cloudfoundry/bosh-openstack-cpi-release
+          path: cpi-release
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: cpi-release/src/openstack_cpi_golang/go.mod
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          working-directory: cpi-release/src/openstack_cpi_golang
+      - name: Unit tests
+        working-directory: cpi-release/src/openstack_cpi_golang
+        run: ./scripts/run-unit-tests
+      - name: Integration tests
+        working-directory: cpi-release/src/openstack_cpi_golang
+        run: ./scripts/run-integration-tests
+
+  # ---------------------------------------------------------------------------
   # DevStack sanity: services/endpoints/networks reachable.
   # ---------------------------------------------------------------------------
   openstack-smoke:
@@ -151,17 +178,6 @@ jobs:
           openstack server remove volume test-vm test-volume
           sleep 10
           [ "$(openstack volume show test-volume -f value -c status)" = "available" ] || { openstack volume show test-volume; exit 1; }
-
-      - name: Cleanup
-        if: always()
-        run: |
-          openstack server delete test-vm || true
-          sleep 5
-          openstack volume delete test-volume || true
-          openstack subnet delete cpi-test-subnet || true
-          openstack network delete cpi-test-network || true
-          openstack security group delete cpi-test-sg || true
-          openstack image delete cirros-test || true
 
       - name: Upload DevStack logs
         if: failure()
@@ -441,10 +457,15 @@ jobs:
           # The upstream script uses `set -ex` (echoes expanded vars) and
           # `| tee bosh.yml` (prints the fully-interpolated manifest, including
           # the jumpbox private key). Patch both out so secrets stay out of logs.
+          # Commit the edit inside the checked-out repo, otherwise `bosh
+          # create-release` (run by the script) refuses on a dirty git tree.
           sed -i -E -e 's/^set -ex$/set -e/' \
                     -e 's/^set -e -x$/set -e/' \
                     -e 's/\| tee bosh.yml/> bosh.yml/' \
                  bosh-openstack-cpi-release/ci/tasks/deploy-manual-networking.sh
+          git -C bosh-openstack-cpi-release \
+            -c user.email=ci@example.com -c user.name=ci \
+            commit -aqm "ci: silence secret echoing for local run"
           bash bosh-openstack-cpi-release/ci/tasks/deploy-manual-networking.sh
 
       - name: Boot a VM through the director
@@ -501,11 +522,6 @@ jobs:
           EOF
           bosh -n -d smoke deploy manifest.yml
           bosh -d smoke instances --details
-          bosh -n -d smoke delete-deployment
-
-      - name: Teardown director
-        if: always()
-        run: bash bosh-openstack-cpi-release/ci/tasks/teardown-director.sh || true
 
       - name: Upload logs
         if: always()
