@@ -80,7 +80,7 @@ jobs:
         with:
           go-version-file: cpi-release/src/openstack_cpi_golang/go.mod
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
           working-directory: cpi-release/src/openstack_cpi_golang
       - name: Unit tests
@@ -105,13 +105,6 @@ jobs:
           openstack flavor list
           openstack image list
           openstack hypervisor stats show || true
-      - name: Upload DevStack logs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: devstack-logs-smoke
-          path: /tmp/devstack-logs/
-          retention-days: 7
 
   # ---------------------------------------------------------------------------
   # CPI operations against DevStack using a tiny Cirros image (proven path):
@@ -178,14 +171,6 @@ jobs:
           openstack server remove volume test-vm test-volume
           sleep 10
           [ "$(openstack volume show test-volume -f value -c status)" = "available" ] || { openstack volume show test-volume; exit 1; }
-
-      - name: Upload DevStack logs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: devstack-logs-cpi-ops
-          path: /tmp/devstack-logs/
-          retention-days: 7
 
   # ---------------------------------------------------------------------------
   # THE REAL TEST: build the actual CPI dev release and run its rspec
@@ -311,17 +296,13 @@ jobs:
           BOSH_OPENSTACK_CA_CERT: ""
         run: |
           mkdir -p output
+          # Quiet the CPI's excon DEBUG request/response flood: the specs build
+          # the logger at DEBUG by default. Raise it to WARN. (Safe to edit the
+          # checked-out spec; this job doesn't build a release.)
+          sed -i -E \
+            's/(@logger = Bosh::Cpi::Logger.new\(STDERR\))/\1; @logger.level = Logger::WARN/' \
+            bosh-openstack-cpi-release/src/bosh_openstack_cpi/spec/integration/support/integration_config.rb
           bash bosh-openstack-cpi-release/ci/tasks/run-lifecycle.sh
-
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cpi-lifecycle-logs
-          path: |
-            /tmp/devstack-logs/
-            output/
-          retention-days: 7
 
   # ---------------------------------------------------------------------------
   # BATS: deploy a REAL BOSH director via create-env, then run the BOSH
@@ -339,12 +320,6 @@ jobs:
     needs: [ unit-specs ]
     steps:
       - uses: actions/checkout@v4
-
-      - name: Checkout CPI release
-        uses: actions/checkout@v4
-        with:
-          repository: cloudfoundry/bosh-openstack-cpi-release
-          path: bosh-openstack-cpi-release
 
       - name: Checkout bosh-deployment
         uses: actions/checkout@v4
@@ -383,33 +358,16 @@ jobs:
           sudo crudini --get /etc/nova/nova.conf libvirt virt_type || true
           openstack hypervisor list --long -f value -c "Hypervisor Type" || true
 
-      - name: Setup Ruby
-        uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: "3.1.7"
-
-      - name: Install BOSH CLI (as bosh-go)
+      - name: Install BOSH CLI
         run: |
           wget -q "https://github.com/cloudfoundry/bosh-cli/releases/download/v7.7.2/bosh-cli-7.7.2-linux-amd64" -O /tmp/bosh
           sudo install -m0755 /tmp/bosh /usr/local/bin/bosh
-          sudo install -m0755 /tmp/bosh /usr/local/bin/bosh-go
 
       - name: Download jammy stemcell
         run: |
           mkdir -p stemcell-director
           wget -q "https://bosh.io/d/stemcells/bosh-openstack-kvm-ubuntu-jammy-go_agent" \
             -O stemcell-director/stemcell.tgz
-          tar -Oxzf stemcell-director/stemcell.tgz stemcell.MF \
-            | awk '/^version:/{gsub(/['"'"'"]/,"",$2); print $2}' > stemcell-director/version
-          echo "stemcell version: $(cat stemcell-director/version)"
-
-      - name: Download BOSH release
-        run: |
-          mkdir -p bosh-release
-          wget -q "https://bosh.io/d/github.com/cloudfoundry/bosh" -O bosh-release/bosh-release.tgz
-          tar -Oxzf bosh-release/bosh-release.tgz release.MF \
-            | awk '/^version:/{gsub(/['"'"'"]/,"",$2); print $2}' > bosh-release/version
-          echo "bosh release version: $(cat bosh-release/version)"
 
       - name: Provision bats network
         uses: ./.github/actions/provision-openstack-net
@@ -431,106 +389,9 @@ jobs:
 
       - name: Deploy BOSH director (create-env)
         env:
-          openstack_flavor: m1.small
-          openstack_connection_timeout: "600"
-          openstack_read_timeout: "180"
-          openstack_write_timeout: "180"
-          openstack_state_timeout: "900"
-          openstack_auth_url: ${{ env.OS_AUTH_URL }}
-          openstack_username: admin
-          openstack_api_key: secret
-          openstack_domain: Default
-          distro: ubuntu
-          availability_zone: "null"
-          # DevStack here is plain HTTP, so no CA is actually used; but the
-          # timeouts ops file references ((openstack_ca_cert)) unconditionally.
-          # Provide a throwaway cert file to satisfy interpolation (excon only
-          # loads ca_cert for https URIs, so it's never read for this http auth_url).
-          openstack_ca_file_path: ${{ github.workspace }}/dummy-ca.pem
-          DEBUG_BATS: "true"
-        run: |
-          openssl req -x509 -newkey rsa:2048 -nodes \
-            -keyout /dev/null -out "${GITHUB_WORKSPACE}/dummy-ca.pem" \
-            -subj "/CN=devstack-dummy-ca" -days 3650
-          # deploy-manual-networking.sh expects this output dir to exist
-          mkdir -p bosh-director-deployment
-          # The upstream script uses `set -ex` (echoes expanded vars) and
-          # `| tee bosh.yml` (prints the fully-interpolated manifest, including
-          # the jumpbox private key). Patch both out so secrets stay out of logs.
-          # Commit the edit inside the checked-out repo, otherwise `bosh
-          # create-release` (run by the script) refuses on a dirty git tree.
-          sed -i -E -e 's/^set -ex$/set -e/' \
-                    -e 's/^set -e -x$/set -e/' \
-                    -e 's/\| tee bosh.yml/> bosh.yml/' \
-                 bosh-openstack-cpi-release/ci/tasks/deploy-manual-networking.sh
-          git -C bosh-openstack-cpi-release \
-            -c user.email=ci@example.com -c user.name=ci \
-            commit -aqm "ci: silence secret echoing for local run"
-          bash bosh-openstack-cpi-release/ci/tasks/deploy-manual-networking.sh
+          OS_AUTH_URL: ${{ env.OS_AUTH_URL }}
+        run: bash scripts/deploy-director.sh
 
       - name: Boot a VM through the director
-        run: |
-          set -eu
-          DIR=bosh-director-deployment
-          export BOSH_ENVIRONMENT=$(jq -r .director_public_ip terraform-cpi/metadata)
-          export BOSH_CLIENT=admin
-          BOSH_CLIENT_SECRET=$(bosh int "$DIR/credentials.yml" --path /admin_password)
-          echo "::add-mask::${BOSH_CLIENT_SECRET}"
-          export BOSH_CLIENT_SECRET
-          export BOSH_CA_CERT="$(bosh int "$DIR/credentials.yml" --path /director_ssl/ca)"
-          bosh -n env
+        run: bash scripts/boot-vm.sh
 
-          # Upload the stemcell VIA the director/CPI (real create_stemcell path)
-          bosh -n upload-stemcell stemcell-director/stemcell.tgz
-
-          # Minimal cloud-config matching the provisioned primary network
-          NET_ID=$(jq -r .primary_net_id terraform-cpi/metadata)
-          SG=$(jq -r .security_group terraform-cpi/metadata)
-          cat > cloud-config.yml <<EOF
-          azs: [{name: z1}]
-          vm_types: [{name: default, cloud_properties: {instance_type: m1.small}}]
-          disk_types: [{name: default, disk_size: 3000}]
-          compilation: {workers: 1, az: z1, vm_type: default, network: private, reuse_compilation_vms: true}
-          networks:
-          - name: private
-            type: manual
-            subnets:
-            - range: 10.0.4.0/24
-              gateway: 10.0.4.1
-              azs: [z1]
-              dns: [8.8.8.8]
-              reserved: [10.0.4.2-10.0.4.10]
-              static: [10.0.4.20-10.0.4.30]
-              cloud_properties: {net_id: ${NET_ID}, security_groups: [${SG}]}
-          EOF
-          bosh -n update-cloud-config cloud-config.yml
-
-          # Deploy one instance that just runs the stemcell (errand-free)
-          cat > manifest.yml <<EOF
-          name: smoke
-          stemcells: [{alias: default, os: ubuntu-jammy, version: latest}]
-          releases: []
-          instance_groups:
-          - name: nothing
-            instances: 1
-            azs: [z1]
-            vm_type: default
-            stemcell: default
-            networks: [{name: private, default: [dns, gateway]}]
-            jobs: []
-          update: {canaries: 1, max_in_flight: 1, canary_watch_time: 30000-600000, update_watch_time: 30000-600000}
-          EOF
-          bosh -n -d smoke deploy manifest.yml
-          bosh -d smoke instances --details
-
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: director-vm-logs
-          path: |
-            /tmp/devstack-logs/
-            bosh-director-deployment/*.json
-          # NOTE: deliberately NOT uploading credentials.yml / bosh.yml — they
-          # contain generated director secrets and the jumpbox private key.
-          retention-days: 7
