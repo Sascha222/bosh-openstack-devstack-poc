@@ -291,7 +291,7 @@ jobs:
   # Runs under QEMU on standard runners. Manual dispatch only.
   # ---------------------------------------------------------------------------
   director-vm:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_director_vm }}
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_director_vm }}
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     needs: [ unit-specs ]
