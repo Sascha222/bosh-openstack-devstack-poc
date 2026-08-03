@@ -205,18 +205,27 @@ jobs:
 
       - name: Neutralize KVM/QEMU image mismatch
         run: |
-          # DevStack on a standard runner is QEMU. Make Nova accept images and
-          # skip the hypervisor_type image-properties check.
-          sudo crudini --set /etc/nova/nova-cpu.conf libvirt virt_type qemu
-          sudo crudini --set /etc/nova/nova-cpu.conf libvirt cpu_mode none
+          # DevStack on a standard runner has no usable KVM. Force QEMU emulation
+          # and drop the ImagePropertiesFilter so KVM-tagged stemcells schedule.
+          # Single-node DevStack uses /etc/nova/nova.conf (nova-cpu.conf is only
+          # created in multi-node setups), so edit whichever files exist.
+          for conf in /etc/nova/nova.conf /etc/nova/nova-cpu.conf; do
+            [ -f "$conf" ] || continue
+            sudo crudini --set "$conf" libvirt virt_type qemu
+            sudo crudini --set "$conf" libvirt cpu_mode none
+            sudo crudini --del "$conf" libvirt cpu_model 2>/dev/null || true
+            sudo crudini --del "$conf" libvirt cpu_models 2>/dev/null || true
+          done
           CUR=$(sudo crudini --get /etc/nova/nova.conf filter_scheduler enabled_filters 2>/dev/null || echo "")
           if [ -n "$CUR" ]; then
             NEW=$(echo "$CUR" | sed -E 's/,?ImagePropertiesFilter//g')
             sudo crudini --set /etc/nova/nova.conf filter_scheduler enabled_filters "$NEW"
           fi
-          sudo systemctl restart devstack@n-cpu || true
-          sudo systemctl restart devstack@n-sch || true
-          sleep 20
+          sudo systemctl restart 'devstack@n-*' || true
+          sleep 30
+          echo "=== effective libvirt virt_type ==="
+          sudo crudini --get /etc/nova/nova.conf libvirt virt_type || true
+          openstack hypervisor list --long -f value -c "Hypervisor Type" || true
 
       - name: Create flavor with no root disk
         run: |
@@ -323,16 +332,23 @@ jobs:
 
       - name: Neutralize KVM/QEMU image mismatch
         run: |
-          sudo crudini --set /etc/nova/nova-cpu.conf libvirt virt_type qemu
-          sudo crudini --set /etc/nova/nova-cpu.conf libvirt cpu_mode none
+          for conf in /etc/nova/nova.conf /etc/nova/nova-cpu.conf; do
+            [ -f "$conf" ] || continue
+            sudo crudini --set "$conf" libvirt virt_type qemu
+            sudo crudini --set "$conf" libvirt cpu_mode none
+            sudo crudini --del "$conf" libvirt cpu_model 2>/dev/null || true
+            sudo crudini --del "$conf" libvirt cpu_models 2>/dev/null || true
+          done
           CUR=$(sudo crudini --get /etc/nova/nova.conf filter_scheduler enabled_filters 2>/dev/null || echo "")
           if [ -n "$CUR" ]; then
             NEW=$(echo "$CUR" | sed -E 's/,?ImagePropertiesFilter//g')
             sudo crudini --set /etc/nova/nova.conf filter_scheduler enabled_filters "$NEW"
           fi
-          sudo systemctl restart devstack@n-cpu || true
-          sudo systemctl restart devstack@n-sch || true
-          sleep 20
+          sudo systemctl restart 'devstack@n-*' || true
+          sleep 30
+          echo "=== effective libvirt virt_type ==="
+          sudo crudini --get /etc/nova/nova.conf libvirt virt_type || true
+          openstack hypervisor list --long -f value -c "Hypervisor Type" || true
 
       - name: Setup Ruby
         uses: ruby/setup-ruby@v1
@@ -393,9 +409,16 @@ jobs:
           openstack_domain: Default
           distro: ubuntu
           availability_zone: "null"
-          openstack_ca_file_path: /opt/stack/data/ca-bundle.pem
+          # DevStack here is plain HTTP, so no CA is actually used; but the
+          # timeouts ops file references ((openstack_ca_cert)) unconditionally.
+          # Provide a throwaway cert file to satisfy interpolation (excon only
+          # loads ca_cert for https URIs, so it's never read for this http auth_url).
+          openstack_ca_file_path: ${{ github.workspace }}/dummy-ca.pem
           DEBUG_BATS: "true"
         run: |
+          openssl req -x509 -newkey rsa:2048 -nodes \
+            -keyout /dev/null -out "${GITHUB_WORKSPACE}/dummy-ca.pem" \
+            -subj "/CN=devstack-dummy-ca" -days 3650
           # deploy-manual-networking.sh expects this output dir to exist
           mkdir -p bosh-director-deployment
           bash bosh-openstack-cpi-release/ci/tasks/deploy-manual-networking.sh
