@@ -353,12 +353,16 @@ jobs:
             sudo crudini --del "$conf" libvirt cpu_model 2>/dev/null || true
             sudo crudini --del "$conf" libvirt cpu_models 2>/dev/null || true
           done
+          # Also clear the libvirt-level CPU model so QEMU uses a plain baseline
+          # instead of Nehalem (DevStack default), which can stall under emulation.
+          sudo crudini --del /etc/libvirt/qemu.conf cpu_model 2>/dev/null || true
           CUR=$(sudo crudini --get /etc/nova/nova.conf filter_scheduler enabled_filters 2>/dev/null || echo "")
           if [ -n "$CUR" ]; then
             NEW=$(echo "$CUR" | sed -E 's/,?ImagePropertiesFilter//g')
             sudo crudini --set /etc/nova/nova.conf filter_scheduler enabled_filters "$NEW"
           fi
           sudo systemctl restart 'devstack@n-*' || true
+          sudo systemctl restart libvirtd 2>/dev/null || true
           sleep 30
           echo "=== effective libvirt virt_type ==="
           sudo crudini --get /etc/nova/nova.conf libvirt virt_type || true

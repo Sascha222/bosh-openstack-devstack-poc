@@ -44,7 +44,7 @@ EOF
 cat > "${DEP}/ops_flavor.yml" <<EOF
 - type: replace
   path: /resource_pools/name=vms/cloud_properties/instance_type
-  value: m1.small
+  value: m1.medium
 EOF
 
 NET_ID="$(jq -r .primary_net_id "${META}")"
