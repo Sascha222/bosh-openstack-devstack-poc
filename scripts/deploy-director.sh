@@ -66,9 +66,9 @@ _monitor() {
     for vm_id in $(openstack server list -f value -c ID 2>/dev/null); do
       echo "--- [monitor] console log for ${vm_id} (last 20 lines) ---"
       openstack console log show "$vm_id" 2>/dev/null | tail -20 || true
-      # Check if the agent port is open (non-blocking)
+      # Extract floating IP (172.24.x.x) and test port 6868
       EXT_IP=$(openstack server show "$vm_id" -f json 2>/dev/null \
-        | python3 -c "import json,sys; addrs=json.load(sys.stdin).get('addresses',{}); print(next((a['addr'] for nets in addrs.values() for a in nets if a.get('OS-EXT-IPS:type')=='floating'),''))" 2>/dev/null || true)
+        | jq -r '[.addresses[][][]? | select(type=="string") | select(startswith("172."))] | first // ""' 2>/dev/null || true)
       if [ -n "$EXT_IP" ]; then
         echo "--- [monitor] testing ${EXT_IP}:6868 ---"
         nc -z -w3 "$EXT_IP" 6868 2>&1 && echo "PORT OPEN" || echo "PORT CLOSED"
