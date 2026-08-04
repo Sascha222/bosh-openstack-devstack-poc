@@ -1,0 +1,95 @@
+name: Setup DevStack
+description: >-
+  Free disk space, deploy DevStack (OVN), source admin credentials into the
+  environment, and make the OpenStack CLI available. This is the single source
+  of truth for bringing up OpenStack in this repo's CI.
+
+inputs:
+  branch:
+    description: DevStack branch to deploy
+    default: stable/2025.1
+  enable_cinder:
+    description: Include Cinder (block storage) services
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Show system info
+      shell: bash
+      run: |
+        echo "=== System Info ==="
+        uname -a
+        df -h
+        free -h
+        nproc
+
+    - name: Free up disk space
+      shell: bash
+      run: |
+        echo "=== Disk space BEFORE cleanup ==="
+        df -h
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /opt/ghc
+        sudo rm -rf /usr/local/share/boost
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /opt/hostedtoolcache
+        echo "=== Disk space AFTER cleanup ==="
+        df -h
+
+    - name: Install DevStack host dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y git python3-pip python3-venv jq crudini
+
+    - name: Deploy DevStack
+      uses: gophercloud/devstack-action@v0.19
+      with:
+        branch: ${{ inputs.branch }}
+        conf_overrides: |
+          FORCE=yes
+          disable_service horizon tempest
+          # OVN networking - disables legacy q-agt, q-l3, q-dhcp, q-meta
+          ENABLED_SERVICES=mysql,rabbit,key,n-api,n-cpu,n-cond,n-sch,placement-api
+          ENABLED_SERVICES+=,g-api,g-reg
+          ${{ inputs.enable_cinder == 'true' && 'ENABLED_SERVICES+=,c-sch,c-api,c-vol' || '' }}
+          ENABLED_SERVICES+=,q-svc,ovn-controller,ovn-northd,q-ovn-metadata-agent
+
+    - name: Install OpenStack CLI
+      shell: bash
+      run: |
+        python3 -m pip install --user python-openstackclient python-cinderclient python-neutronclient
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+    - name: Export OpenStack admin credentials
+      shell: bash
+      run: |
+        # gophercloud/devstack-action checks DevStack out to ./devstack
+        if [ ! -f ./devstack/openrc ]; then
+          echo "::error::./devstack/openrc not found - DevStack layout changed"
+          find / -name openrc -path '*devstack*' 2>/dev/null | head
+          exit 1
+        fi
+        set +u
+        source ./devstack/openrc admin admin
+        set -u
+        # Persist for later steps/jobs on this runner
+        {
+          echo "OS_AUTH_URL=$OS_AUTH_URL"
+          echo "OS_USERNAME=$OS_USERNAME"
+          echo "OS_PASSWORD=$OS_PASSWORD"
+          echo "OS_PROJECT_NAME=$OS_PROJECT_NAME"
+          echo "OS_USER_DOMAIN_NAME=${OS_USER_DOMAIN_NAME:-Default}"
+          echo "OS_PROJECT_DOMAIN_NAME=${OS_PROJECT_DOMAIN_NAME:-Default}"
+          echo "OS_REGION_NAME=${OS_REGION_NAME:-RegionOne}"
+          echo "OS_IDENTITY_API_VERSION=3"
+          echo "OS_INTERFACE=public"
+        } >> "$GITHUB_ENV"
+
+    - name: Verify OpenStack is reachable
+      shell: bash
+      run: |
+        openstack --version
+        openstack endpoint list
+        openstack service list

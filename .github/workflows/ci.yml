@@ -1,0 +1,409 @@
+name: CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_lifecycle:
+        description: Run the (slow) real CPI lifecycle job
+        type: boolean
+        default: true
+      run_director_vm:
+        description: Deploy a real BOSH director and boot a VM through it (very slow)
+        type: boolean
+        default: false
+  pull_request:
+  push:
+    branches: [ main, master ]
+
+# Pin the versions the upstream CPI CI image uses.
+env:
+  RUBY_VERSION: "3.1.7"
+  BOSH_CLI_VERSION: "7.7.2"
+  CPI_REPO: cloudfoundry/bosh-openstack-cpi-release
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Informational: does this runner expose usable KVM? Lifecycle does not
+  # depend on this (it runs under QEMU), but the answer decides whether BATS
+  # could ever be fast here.
+  # ---------------------------------------------------------------------------
+  kvm-probe:
+    if: false
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Probe virtualization support
+        run: |
+          echo "=== /dev/kvm ==="
+          if [ -e /dev/kvm ]; then echo "present"; ls -la /dev/kvm; else echo "ABSENT"; fi
+          echo "=== CPU virt flags ==="
+          grep -oE '(vmx|svm)' /proc/cpuinfo | sort -u || echo "none"
+          echo "=== modprobe kvm ==="
+          sudo modprobe kvm 2>&1 || echo "modprobe kvm failed"
+          sudo modprobe kvm-intel 2>/dev/null || sudo modprobe kvm-amd 2>/dev/null || true
+          lsmod | grep kvm || echo "kvm module not loaded"
+
+  # ---------------------------------------------------------------------------
+  # CPI Ruby unit specs + rubocop. No OpenStack needed.
+  # ---------------------------------------------------------------------------
+  unit-specs:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout CPI release
+        uses: actions/checkout@v7
+        with:
+          repository: cloudfoundry/bosh-openstack-cpi-release
+          path: cpi-release
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.1.7"
+      - name: Unit specs + rubocop
+        working-directory: cpi-release/src/bosh_openstack_cpi
+        run: |
+          bundle install
+          bundle exec rake rubocop
+          bundle exec rake spec:unit
+
+  # ---------------------------------------------------------------------------
+  # Go CPI unit + integration specs + lint. Mirrors upstream's go.yml. The Go
+  # integration tests are httptest-mocked, so no OpenStack/DevStack is needed.
+  # ---------------------------------------------------------------------------
+  go-tests:
+    if: false
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout CPI release
+        uses: actions/checkout@v7
+        with:
+          repository: cloudfoundry/bosh-openstack-cpi-release
+          path: cpi-release
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: cpi-release/src/openstack_cpi_golang/go.mod
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          working-directory: cpi-release/src/openstack_cpi_golang
+      - name: Unit tests
+        working-directory: cpi-release/src/openstack_cpi_golang
+        run: ./scripts/run-unit-tests
+      - name: Integration tests
+        working-directory: cpi-release/src/openstack_cpi_golang
+        run: ./scripts/run-integration-tests
+
+  # ---------------------------------------------------------------------------
+  # DevStack sanity: services/endpoints/networks reachable.
+  # ---------------------------------------------------------------------------
+  openstack-smoke:
+    if: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-devstack
+      - name: Inspect OpenStack
+        run: |
+          openstack network list
+          openstack flavor list
+          openstack image list
+          openstack hypervisor stats show || true
+
+  # ---------------------------------------------------------------------------
+  # CPI operations against DevStack using a tiny Cirros image (proven path):
+  # security groups, custom network, VM create, volume attach/detach.
+  # Merges the old bosh-cpi-test.yml + cpi-extended-test.yml.
+  # ---------------------------------------------------------------------------
+  cpi-operations:
+    if: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-devstack
+
+      - name: Upload Cirros image
+        run: |
+          wget -q https://download.cirros-cloud.net/0.6.2/cirros-0.6.2-x86_64-disk.img -O cirros.img
+          openstack image create --disk-format qcow2 --container-format bare \
+            --public --file cirros.img cirros-test
+          openstack image show cirros-test
+
+      - name: Test - security group
+        id: secgroup
+        run: |
+          openstack security group create --description "cpi test" cpi-test-sg
+          openstack security group rule create --protocol tcp --dst-port 22:22 --remote-ip 0.0.0.0/0 cpi-test-sg
+          openstack security group rule create --protocol icmp cpi-test-sg
+          openstack security group rule list cpi-test-sg
+
+      - name: Test - custom network
+        id: network
+        run: |
+          openstack network create cpi-test-network
+          openstack subnet create --network cpi-test-network \
+            --subnet-range 192.168.100.0/24 --dns-nameserver 8.8.8.8 cpi-test-subnet
+          openstack network show cpi-test-network
+
+      - name: Test - VM create
+        id: vm
+        run: |
+          openstack server create --flavor m1.tiny --image cirros-test \
+            --network cpi-test-network --security-group cpi-test-sg test-vm
+          for i in $(seq 1 60); do
+            STATUS=$(openstack server show test-vm -f value -c status)
+            echo "attempt $i: $STATUS"
+            [ "$STATUS" = "ACTIVE" ] && break
+            if [ "$STATUS" = "ERROR" ]; then openstack server show test-vm; exit 1; fi
+            sleep 5
+          done
+          openstack server show test-vm
+
+      - name: Test - volume attach/detach
+        id: volume
+        run: |
+          openstack volume create --size 1 test-volume
+          for i in $(seq 1 30); do
+            S=$(openstack volume show test-volume -f value -c status)
+            [ "$S" = "available" ] && break
+            [ "$S" = "error" ] && { openstack volume show test-volume; exit 1; }
+            sleep 2
+          done
+          openstack server add volume test-vm test-volume
+          sleep 10
+          [ "$(openstack volume show test-volume -f value -c status)" = "in-use" ] || { openstack volume show test-volume; exit 1; }
+          openstack server remove volume test-vm test-volume
+          sleep 10
+          [ "$(openstack volume show test-volume -f value -c status)" = "available" ] || { openstack volume show test-volume; exit 1; }
+
+  # ---------------------------------------------------------------------------
+  # THE REAL TEST: build the actual CPI dev release and run its rspec
+  # integration ("lifecycle") specs against DevStack. Runs under QEMU; we
+  # neutralize the KVM/QEMU image mismatch and fix Glance large uploads.
+  # ---------------------------------------------------------------------------
+  cpi-lifecycle:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_lifecycle }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    needs: [ unit-specs ]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Checkout CPI release
+        uses: actions/checkout@v7
+        with:
+          repository: cloudfoundry/bosh-openstack-cpi-release
+          path: bosh-openstack-cpi-release
+
+      - uses: ./.github/actions/setup-devstack
+
+      - name: Fix Glance for large HTTP uploads
+        run: |
+          # POC Problem 8: trailing slash makes file:// URLs malformed; also the
+          # single eventlet worker + short timeouts kill ~1.3GB uploads.
+          sudo crudini --set /etc/glance/glance-api.conf glance_store filesystem_store_datadir /opt/stack/data/glance/images
+          sudo crudini --set /etc/glance/glance-api.conf DEFAULT workers 4
+          sudo crudini --set /etc/glance/glance-api.conf DEFAULT client_socket_timeout 3600
+          sudo crudini --set /etc/glance/glance-api.conf DEFAULT send_timeout 3600
+          sudo systemctl restart devstack@g-api || sudo systemctl restart 'devstack@g-*' || true
+          sleep 20
+
+      - name: Neutralize KVM/QEMU image mismatch
+        run: |
+          # DevStack on a standard runner has no usable KVM. Force QEMU emulation
+          # and drop the ImagePropertiesFilter so KVM-tagged stemcells schedule.
+          # Single-node DevStack uses /etc/nova/nova.conf (nova-cpu.conf is only
+          # created in multi-node setups), so edit whichever files exist.
+          for conf in /etc/nova/nova.conf /etc/nova/nova-cpu.conf; do
+            [ -f "$conf" ] || continue
+            sudo crudini --set "$conf" libvirt virt_type qemu
+            sudo crudini --set "$conf" libvirt cpu_mode none
+            sudo crudini --del "$conf" libvirt cpu_model 2>/dev/null || true
+            sudo crudini --del "$conf" libvirt cpu_models 2>/dev/null || true
+          done
+          CUR=$(sudo crudini --get /etc/nova/nova.conf filter_scheduler enabled_filters 2>/dev/null || echo "")
+          if [ -n "$CUR" ]; then
+            NEW=$(echo "$CUR" | sed -E 's/,?ImagePropertiesFilter//g')
+            sudo crudini --set /etc/nova/nova.conf filter_scheduler enabled_filters "$NEW"
+          fi
+          sudo systemctl restart 'devstack@n-*' || true
+          sleep 30
+          echo "=== effective libvirt virt_type ==="
+          sudo crudini --get /etc/nova/nova.conf libvirt virt_type || true
+          openstack hypervisor list --long -f value -c "Hypervisor Type" || true
+
+      - name: Create flavor with no root disk
+        run: |
+          openstack flavor show no-root-disk >/dev/null 2>&1 || \
+            openstack flavor create --ram 1024 --disk 0 --vcpus 1 no-root-disk
+
+      - name: Register volumev3 catalog alias for Cinder
+        run: |
+          # Modern DevStack registers Cinder as service type 'block-storage',
+          # but the CPI's fog-openstack 1.1.5 searches the catalog for
+          # 'volumev3'/'volumev2'/'volume' -> "No endpoint match" on create_disk.
+          # Alias the existing v3 volume endpoint under the type fog expects.
+          VOL_URL=$(openstack endpoint list --service block-storage \
+            --interface public -f value -c URL | head -1)
+          echo "cinder public URL: ${VOL_URL}"
+          if ! openstack service show volumev3 >/dev/null 2>&1; then
+            openstack service create --name cinderv3 volumev3
+          fi
+          for iface in public internal admin; do
+            openstack endpoint create volumev3 "$iface" "$VOL_URL" --region RegionOne || true
+          done
+          openstack endpoint list --service volumev3
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.1.7"
+
+      - name: Install BOSH CLI
+        run: |
+          wget -q "https://github.com/cloudfoundry/bosh-cli/releases/download/v7.7.2/bosh-cli-7.7.2-linux-amd64" -O /tmp/bosh
+          sudo install -m0755 /tmp/bosh /usr/local/bin/bosh
+
+      - name: Download jammy stemcell
+        run: |
+          mkdir -p openstack-lifecycle-stemcell
+          wget -q "https://bosh.io/d/stemcells/bosh-openstack-kvm-ubuntu-jammy-go_agent" \
+            -O openstack-lifecycle-stemcell/stemcell.tgz
+          ls -lh openstack-lifecycle-stemcell/stemcell.tgz
+
+      - name: Provision lifecycle network
+        uses: ./.github/actions/provision-openstack-net
+        with:
+          prefix: lifecycle
+          external_network: public
+          output: terraform-cpi/metadata
+
+      - name: Run lifecycle integration specs
+        env:
+          BOSH_OPENSTACK_DOMAIN: Default
+          BOSH_OPENSTACK_PROJECT: admin
+          BOSH_OPENSTACK_AUTH_URL_V3: ${{ env.OS_AUTH_URL }}
+          BOSH_OPENSTACK_USERNAME_V3: admin
+          BOSH_OPENSTACK_API_KEY_V3: secret
+          BOSH_CLI_SILENCE_SLOW_LOAD_WARNING: "true"
+          BOSH_OPENSTACK_CONNECT_TIMEOUT: "600"
+          BOSH_OPENSTACK_READ_TIMEOUT: "180"
+          BOSH_OPENSTACK_WRITE_TIMEOUT: "180"
+          BOSH_OPENSTACK_FLAVOR_WITH_NO_ROOT_DISK: no-root-disk
+          BOSH_OPENSTACK_EXCLUDE_CINDER_V1: "true"
+          # DevStack's default Cinder volume type (required by the specs).
+          BOSH_OPENSTACK_VOLUME_TYPE: lvmdriver-1
+          # Optional vars the script references bare under `set -u`; bind empty.
+          BOSH_OPENSTACK_AUTH_URL_V2: ""
+          BOSH_OPENSTACK_USERNAME_V2: ""
+          BOSH_OPENSTACK_API_KEY_V2: ""
+          BOSH_OPENSTACK_CA_CERT: ""
+        run: |
+          mkdir -p output
+          # Quiet the CPI's excon DEBUG request/response flood: the specs build
+          # the logger at DEBUG by default. Raise it to INFO — this drops the
+          # per-request excon spam but keeps the useful "Creating VM / Waiting
+          # for..." progress lines. (Safe to edit the checked-out spec; this job
+          # doesn't build a release.)
+          sed -i -E \
+            's/(@logger = Bosh::Cpi::Logger.new\(STDERR\))/\1; @logger.level = Logger::INFO/' \
+            bosh-openstack-cpi-release/src/bosh_openstack_cpi/spec/integration/support/integration_config.rb
+          bash bosh-openstack-cpi-release/ci/tasks/run-lifecycle.sh
+
+  # ---------------------------------------------------------------------------
+  # BATS: deploy a REAL BOSH director via create-env, then run the BOSH
+  # Acceptance Tests through it. Mirrors upstream bats-ubuntu-manual. Slow and
+  # ---------------------------------------------------------------------------
+  # Deploy a REAL BOSH director via create-env, then use that director to
+  # upload a stemcell and boot one VM through the CPI. This proves the full
+  # director-driven create_vm path (not just the direct-CPI lifecycle specs).
+  # Runs under QEMU on standard runners. Manual dispatch only.
+  # ---------------------------------------------------------------------------
+  director-vm:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_director_vm }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    needs: [ unit-specs ]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Checkout bosh-deployment
+        uses: actions/checkout@v7
+        with:
+          repository: cloudfoundry/bosh-deployment
+          path: bosh-deployment
+
+      - uses: ./.github/actions/setup-devstack
+
+      - name: Fix Glance for large HTTP uploads
+        run: |
+          sudo crudini --set /etc/glance/glance-api.conf glance_store filesystem_store_datadir /opt/stack/data/glance/images
+          sudo crudini --set /etc/glance/glance-api.conf DEFAULT workers 4
+          sudo crudini --set /etc/glance/glance-api.conf DEFAULT client_socket_timeout 3600
+          sudo crudini --set /etc/glance/glance-api.conf DEFAULT send_timeout 3600
+          sudo systemctl restart devstack@g-api || sudo systemctl restart 'devstack@g-*' || true
+          sleep 20
+
+      - name: Neutralize KVM/QEMU image mismatch
+        run: |
+          for conf in /etc/nova/nova.conf /etc/nova/nova-cpu.conf; do
+            [ -f "$conf" ] || continue
+            sudo crudini --set "$conf" libvirt virt_type qemu
+            sudo crudini --set "$conf" libvirt cpu_mode none
+            sudo crudini --del "$conf" libvirt cpu_model 2>/dev/null || true
+            sudo crudini --del "$conf" libvirt cpu_models 2>/dev/null || true
+          done
+          # Also clear the libvirt-level CPU model so QEMU uses a plain baseline
+          # instead of Nehalem (DevStack default), which can stall under emulation.
+          sudo crudini --del /etc/libvirt/qemu.conf cpu_model 2>/dev/null || true
+          CUR=$(sudo crudini --get /etc/nova/nova.conf filter_scheduler enabled_filters 2>/dev/null || echo "")
+          if [ -n "$CUR" ]; then
+            NEW=$(echo "$CUR" | sed -E 's/,?ImagePropertiesFilter//g')
+            sudo crudini --set /etc/nova/nova.conf filter_scheduler enabled_filters "$NEW"
+          fi
+          sudo systemctl restart 'devstack@n-*' || true
+          sudo systemctl restart libvirtd 2>/dev/null || true
+          sleep 30
+          echo "=== effective libvirt virt_type ==="
+          sudo crudini --get /etc/nova/nova.conf libvirt virt_type || true
+          openstack hypervisor list --long -f value -c "Hypervisor Type" || true
+
+      - name: Install BOSH CLI
+        run: |
+          wget -q "https://github.com/cloudfoundry/bosh-cli/releases/download/v7.7.2/bosh-cli-7.7.2-linux-amd64" -O /tmp/bosh
+          sudo install -m0755 /tmp/bosh /usr/local/bin/bosh
+
+      - name: Download jammy stemcell
+        run: |
+          mkdir -p stemcell-director
+          wget -q "https://bosh.io/d/stemcells/bosh-openstack-kvm-ubuntu-jammy-go_agent" \
+            -O stemcell-director/stemcell.tgz
+
+      - name: Provision bats network
+        uses: ./.github/actions/provision-openstack-net
+        with:
+          topology: bats
+          prefix: bats
+          external_network: public
+          output: terraform-cpi/metadata
+
+      - name: Deploy BOSH director (create-env)
+        env:
+          OS_AUTH_URL: ${{ env.OS_AUTH_URL }}
+        run: bash scripts/deploy-director.sh
+
+      - name: Boot a VM through the director
+        run: bash scripts/boot-vm.sh
+
+      - name: Nova logs (on failure)
+        if: failure()
+        run: |
+          echo "==================== VM console logs ===================="
+          for vm_id in $(openstack server list -f value -c ID 2>/dev/null); do
+            echo "--- console log for VM ${vm_id} ---"
+            openstack console log show "$vm_id" 2>&1 | tail -80 || true
+          done
+          echo "==================== nova-scheduler ===================="
+          sudo journalctl -u devstack@n-sch --no-pager | tail -50 || true
+          echo "==================== nova-compute ===================="
+          sudo journalctl -u devstack@n-cpu --no-pager | tail -50 || true
