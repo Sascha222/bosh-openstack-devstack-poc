@@ -394,9 +394,12 @@ jobs:
       - name: Nova logs (on failure)
         if: failure()
         run: |
-          # Print the scheduler/compute logs to the job console so a
-          # "No valid host" reason is visible without downloading artifacts.
-          for svc in n-sch n-cpu n-cond; do
-            echo "==================== devstack@${svc} ===================="
-            sudo journalctl -u "devstack@${svc}" --no-pager | tail -100 || true
+          echo "==================== VM console logs ===================="
+          for vm_id in $(openstack server list -f value -c ID 2>/dev/null); do
+            echo "--- console log for VM ${vm_id} ---"
+            openstack console log show "$vm_id" 2>&1 | tail -80 || true
           done
+          echo "==================== nova-scheduler ===================="
+          sudo journalctl -u devstack@n-sch --no-pager | tail -50 || true
+          echo "==================== nova-compute ===================="
+          sudo journalctl -u devstack@n-cpu --no-pager | tail -50 || true
