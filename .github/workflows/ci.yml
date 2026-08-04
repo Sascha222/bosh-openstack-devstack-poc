@@ -383,16 +383,6 @@ jobs:
           external_network: public
           output: terraform-cpi/metadata
 
-      - name: Route runner into tenant subnet
-        run: |
-          set -eux
-          # Everything is on one host; reach the director's private IP via the
-          # router's external-gateway IP on br-ex instead of a floating IP.
-          GW=$(jq -r .router_ext_gw_ip terraform-cpi/metadata)
-          sudo ip route replace 10.0.4.0/24 via "$GW"
-          sudo ip route replace 10.0.5.0/24 via "$GW"
-          ip route get 10.0.4.3
-
       - name: Deploy BOSH director (create-env)
         env:
           OS_AUTH_URL: ${{ env.OS_AUTH_URL }}

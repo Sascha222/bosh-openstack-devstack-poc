@@ -96,22 +96,22 @@ JSON
 elif [ "$TOPOLOGY" = "bats" ]; then
   # --- bats topology (modules/bats + bats-manual root) ----------------------
   # primary 10.0.4.0/24 (dhcp), secondary 10.0.5.0/24 (dhcp).
-  # Everything runs on one host: instead of floating IPs, the director keeps
-  # its private IP and the runner reaches the tenant subnet via a host route
-  # through the router's external-gateway IP (emitted as router_ext_gw_ip).
+  # Allocate a floating IP for the director so create-env can reach the agent
+  # via 172.24.4.x — always reachable from the host via br-ex without needing
+  # host-route tricks.
   echo "=== networks (bats) ==="
   PRIMARY_ID=$(make_net   "${PREFIX}-primary"   "10.0.4.0/24" "10.0.4.1" yes yes)
   SECONDARY_ID=$(make_net "${PREFIX}-secondary" "10.0.5.0/24" "10.0.5.1" yes yes)
 
-  ROUTER_EXT_GW_IP=$(openstack router show "${PREFIX}-router" -f json \
-    | jq -r '.external_gateway_info.external_fixed_ips[0].ip_address')
+  # Allocate a floating IP for the director. The host reaches 172.24.4.x directly
+  # via br-ex (DevStack always sets this up), so this is the reliable path for
+  # create-env to reach the BOSH agent — no host-route tricks needed.
+  DIRECTOR_FLOATING_IP=$(openstack floating ip create "$EXT_NET" -f value -c floating_ip_address)
 
   cat > "$OUT" <<JSON
 {
-  "director_public_ip": "10.0.4.3",
+  "director_public_ip": "${DIRECTOR_FLOATING_IP}",
   "director_private_ip": "10.0.4.3",
-  "router_ext_gw_ip": "${ROUTER_EXT_GW_IP}",
-  "floating_ip": "10.0.4.6",
   "primary_net_id": "${PRIMARY_ID}",
   "primary_net_cidr": "10.0.4.0/24",
   "primary_net_gateway": "10.0.4.1",

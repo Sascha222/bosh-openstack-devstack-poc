@@ -47,36 +47,28 @@ cat > "${DEP}/ops_flavor.yml" <<EOF
   value: m1.small
 EOF
 
-# Use internal-only networking: the runner reaches the director via a host route
-# to the tenant subnet, so we don't need a VIP/external IP.
-# external-ip-not-recommended.yml sets cloud_provider/mbus to external_ip:6868
-# which requires a VIP network and floating IP — remove it.
-cat > "${DEP}/ops_internal_only.yml" <<EOF
-- type: replace
-  path: /cloud_provider/mbus
-  value: "https://mbus:((mbus_bootstrap_password))@((internal_ip)):6868"
-EOF
-
 NET_ID="$(jq -r .primary_net_id "${META}")"
 SG="$(jq -r .security_group "${META}")"
 GW="$(jq -r .primary_net_gateway "${META}")"
 CIDR="$(jq -r .primary_net_cidr "${META}")"
 INTERNAL_IP="$(jq -r .director_private_ip "${META}")"
+EXTERNAL_IP="$(jq -r .director_public_ip "${META}")"
 KEY_NAME="$(jq -r .default_key_name "${META}")"
 
-echo "Deploying BOSH director at ${INTERNAL_IP} (create-env)..."
+echo "Deploying BOSH director: internal=${INTERNAL_IP} external=${EXTERNAL_IP}..."
 bosh create-env "${BOSH_DEPLOYMENT}/bosh.yml" \
   --state "${DEP}/state.json" \
   --vars-store "${DEP}/credentials.yml" \
   -o "${BOSH_DEPLOYMENT}/openstack/cpi.yml" \
   -o "${BOSH_DEPLOYMENT}/openstack/use-jammy.yml" \
+  -o "${BOSH_DEPLOYMENT}/external-ip-not-recommended.yml" \
   -o "${BOSH_DEPLOYMENT}/jumpbox-user.yml" \
   -o "${DEP}/ops_local_cpi.yml" \
   -o "${DEP}/ops_local_stemcell.yml" \
   -o "${DEP}/ops_flavor.yml" \
-  -o "${DEP}/ops_internal_only.yml" \
   -v director_name=bosh \
   -v internal_ip="${INTERNAL_IP}" \
+  -v external_ip="${EXTERNAL_IP}" \
   -v internal_gw="${GW}" \
   -v internal_cidr="${CIDR}" \
   -v net_id="${NET_ID}" \
@@ -90,8 +82,8 @@ bosh create-env "${BOSH_DEPLOYMENT}/bosh.yml" \
   -v region=RegionOne \
   -v az=nova
 
-echo "Verifying director at ${INTERNAL_IP}..."
-BOSH_ENVIRONMENT="${INTERNAL_IP}"
+echo "Verifying director at ${EXTERNAL_IP}..."
+BOSH_ENVIRONMENT="${EXTERNAL_IP}"
 export BOSH_ENVIRONMENT
 export BOSH_CLIENT=admin
 BOSH_CLIENT_SECRET="$(bosh int "${DEP}/credentials.yml" --path /admin_password)"
