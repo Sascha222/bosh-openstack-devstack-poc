@@ -67,8 +67,8 @@ _monitor() {
       echo "--- [monitor] console log for ${vm_id} (last 20 lines) ---"
       openstack console log show "$vm_id" 2>/dev/null | tail -20 || true
       # Extract floating IP (172.24.x.x) and test port 6868
-      EXT_IP=$(openstack server show "$vm_id" -f json 2>/dev/null \
-        | jq -r '[.addresses[][][]? | select(type=="string") | select(startswith("172."))] | first // ""' 2>/dev/null || true)
+      EXT_IP=$(openstack server show "$vm_id" -f value -c addresses 2>/dev/null \
+        | grep -oE '172\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
       if [ -n "$EXT_IP" ]; then
         echo "--- [monitor] testing ${EXT_IP}:6868 ---"
         nc -z -w3 "$EXT_IP" 6868 2>&1 && echo "PORT OPEN" || echo "PORT CLOSED"
