@@ -10,7 +10,7 @@
 # Required env (set by ci.yml):
 #   OS_AUTH_URL
 # Reads network facts from terraform-cpi/metadata (bats topology).
-set -euo pipefail
+set -euxo pipefail
 
 META=terraform-cpi/metadata
 DEP=bosh-director-deployment
@@ -56,6 +56,24 @@ EXTERNAL_IP="$(jq -r .director_public_ip "${META}")"
 KEY_NAME="$(jq -r .default_key_name "${META}")"
 
 echo "Deploying BOSH director: internal=${INTERNAL_IP} external=${EXTERNAL_IP}..."
+
+# Background monitor: every 60s print VM state + console tail so we can see
+# what the guest OS is doing while create-env polls for the agent.
+_monitor() {
+  while sleep 60; do
+    echo "--- [monitor] VM list ---"
+    openstack server list -f value -c ID -c Name -c Status -c Networks 2>/dev/null || true
+    for vm_id in $(openstack server list -f value -c ID 2>/dev/null); do
+      echo "--- [monitor] console log for ${vm_id} (last 20 lines) ---"
+      openstack console log show "$vm_id" 2>/dev/null | tail -20 || true
+    done
+  done
+}
+_monitor &
+MONITOR_PID=$!
+# shellcheck disable=SC2064
+trap "kill $MONITOR_PID 2>/dev/null || true" EXIT
+
 bosh create-env "${BOSH_DEPLOYMENT}/bosh.yml" \
   --state "${DEP}/state.json" \
   --vars-store "${DEP}/credentials.yml" \
